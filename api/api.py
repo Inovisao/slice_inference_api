@@ -2,16 +2,21 @@ import json
 import os
 import random
 import shutil
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import cv2
+import numpy as np
 from fastapi import FastAPI, HTTPException
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from config.settings import DatasetConfig, SlicingConfig
 from slicing.sahi import Sahi, SahiPipeline
 from reconstruction.reconstructor import ImageReconstructor
 from reconstruction.visualizer import SliceVisualizer
+from inference.engine import TileInferenceEngine
+from inference.pipeline import InferencePipeline
 
 app = FastAPI()
 
@@ -400,6 +405,132 @@ async def reconstruct_single_image(request: ReconstructRequest):
         "source_image": config.get("source_image"),
         "reconstructed": reconstructed_path,
         "informative": informative_path,
+    }
+
+
+# --- inference ---
+
+class InferenceRequest(BaseModel):
+    model_path: str
+    conf: float = Field(default=0.25, gt=0.0, le=1.0)
+    iou_thr: float = Field(default=0.45, gt=0.0, le=1.0)
+    suppression: str = Field(default="wbf", pattern="^(nms|bws|nms_ioa|wbf)$")
+    overlap_percentage: float = Field(default=0.15, gt=0.0, lt=1.0)
+    device: str = Field(default="cpu", pattern="^(cpu|cuda)$")
+
+
+def _make_inference_pipeline(request: InferenceRequest) -> InferencePipeline:
+    if not os.path.exists(request.model_path):
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "Model file not found", "path": request.model_path},
+        )
+    slicing_config = SlicingConfig(
+        slicing_mode="sahi",
+        tile_size=(640, 640),
+        overlap_percentage=request.overlap_percentage,
+        min_object_coverage=0.5,
+    )
+    engine = TileInferenceEngine(request.model_path, device=request.device)
+    slicer = Sahi(slicing_config)
+    return InferencePipeline(
+        engine=engine,
+        slicer=slicer,
+        suppression=request.suppression,
+        conf_thr=request.conf,
+        iou_thr=request.iou_thr,
+    )
+
+
+def _load_image_rgb(img_path: str, img_name: str) -> np.ndarray:
+    img_pil = Image.open(img_path).convert("RGB")
+    return np.array(img_pil)
+
+
+@app.post("/inference/single_image")
+async def inference_single_image(request: InferenceRequest):
+    images = _validate_dataset(DATASET_PATH)
+
+    img_name = random.choice(images)
+    img_path = os.path.join(DATASET_PATH, img_name)
+
+    img_np = _load_image_rgb(img_path, img_name)
+    _validate_image_size(
+        cv2.imread(img_path), (640, 640), img_name
+    )
+
+    id_image = _next_id()
+    base_path = os.path.join(OUTPUT_PATH, str(id_image))
+    os.makedirs(base_path, exist_ok=True)
+
+    stem = Path(img_name).stem
+    out_path = os.path.join(base_path, f"{stem}_resultado.jpg")
+
+    pipeline = _make_inference_pipeline(request)
+    stats = pipeline.run(img_np, out_path)
+
+    return {
+        "id_image": id_image,
+        "image_name": img_name,
+        "model": request.model_path,
+        "suppression": request.suppression,
+        "conf_threshold": request.conf,
+        "detections": stats["detections"],
+        "raw_detections": stats["raw_detections"],
+        "duplicates_removed": stats["duplicates_removed"],
+        "scores": stats["scores"],
+        "output_path": out_path,
+    }
+
+
+@app.post("/inference/dataset")
+async def inference_dataset(request: InferenceRequest):
+    images = _validate_dataset(DATASET_PATH)
+
+    results = []
+    skipped: List[str] = []
+
+    for img_name in images:
+        img_path = os.path.join(DATASET_PATH, img_name)
+
+        try:
+            img_cv = cv2.imread(img_path)
+            if img_cv is None:
+                skipped.append(img_name)
+                continue
+
+            img_h, img_w = img_cv.shape[:2]
+            if img_w < 640 or img_h < 640:
+                skipped.append(img_name)
+                continue
+
+            img_np = _load_image_rgb(img_path, img_name)
+            id_image = _next_id()
+            base_path = os.path.join(OUTPUT_PATH, str(id_image))
+            os.makedirs(base_path, exist_ok=True)
+
+            stem = Path(img_name).stem
+            out_path = os.path.join(base_path, f"{stem}_resultado.jpg")
+
+            pipeline = _make_inference_pipeline(request)
+            stats = pipeline.run(img_np, out_path)
+
+            results.append({
+                "id_image": id_image,
+                "image_name": img_name,
+                "detections": stats["detections"],
+                "output_path": out_path,
+            })
+        except Exception as e:
+            skipped.append(img_name)
+
+    return {
+        "model": request.model_path,
+        "suppression": request.suppression,
+        "processed_images": len(results),
+        "skipped_images": skipped,
+        "total_detections": sum(r["detections"] for r in results),
+        "results": results,
     }
 
 

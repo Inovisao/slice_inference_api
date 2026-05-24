@@ -1,0 +1,25 @@
+dataset:
+  input_path: ./dataset
+  output_path: ./output
+
+slicing:
+  mode: sahi           # sahi | asahi
+  tile_size: [640, 640]
+  overlap_percentage: 0.15
+  min_object_coverage: 0.5
+
+crossfolds:
+  n_folds: 5
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+
+inference:
+  suppression: wbf     # nms | bws | nms_ioa | wbf
+  models_path: ./models
+  output_results_path: ./output
+  conf_threshold: 0.25
+  iou_threshold: 0.45
+  batch_size: 32
+  num_workers: 4
+  save_original_annotations: true

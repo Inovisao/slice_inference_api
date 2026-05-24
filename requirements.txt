@@ -1,2 +1,5 @@
 opencv-python
 fastapi[standard]
+pyyaml
+ultralytics
+ensemble-boxes
