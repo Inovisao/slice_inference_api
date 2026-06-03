@@ -10,7 +10,7 @@ from config.settings import (
 )
 
 _VALID_SLICING_MODES = ("sahi", "asahi")
-_VALID_SUPPRESSIONS = ("nms", "bws", "nms_ioa", "wbf")
+_VALID_SUPPRESSIONS = ("nms", "bws", "nms_ioa", "wbf", "cluster_diou_nms")
 
 
 class ConfigLoader:

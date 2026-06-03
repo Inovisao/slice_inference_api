@@ -4,7 +4,12 @@ import numpy as np
 
 from inference.engine import TileInferenceEngine
 from inference.visualizer import draw_detections
-from slicing.sahi import Sahi
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class Slicer(Protocol):
+    def generate_tiles(self, image): ...
 
 
 def _apply_nms(
@@ -57,11 +62,20 @@ def _recover_labels(
     return np.array(recovered, dtype=int)
 
 
+def _apply_cluster_diou_nms(
+    boxes: np.ndarray, scores: np.ndarray, labels: np.ndarray, iou_thr: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    from suppression.cluster_diou_nms import cluster_diou_nms
+
+    return cluster_diou_nms(boxes, scores, labels, iou_thr=iou_thr)
+
+
 _SUPPRESSION_REGISTRY = {
     "nms": _apply_nms,
     "bws": _apply_bws,
     "nms_ioa": _apply_nms_ioa,
     "wbf": _apply_wbf,
+    "cluster_diou_nms": _apply_cluster_diou_nms,
 }
 
 
@@ -69,10 +83,11 @@ class InferencePipeline:
     def __init__(
         self,
         engine: TileInferenceEngine,
-        slicer: Sahi,
+        slicer: Slicer,
         suppression: str = "wbf",
         conf_thr: float = 0.25,
         iou_thr: float = 0.45,
+        include_full_inference: bool = False,
     ):
         if suppression not in _SUPPRESSION_REGISTRY:
             raise ValueError(
@@ -84,6 +99,7 @@ class InferencePipeline:
         self.suppression = suppression
         self.conf_thr = conf_thr
         self.iou_thr = iou_thr
+        self.include_full_inference = include_full_inference
 
     def run(self, image: np.ndarray, out_path: str) -> dict[str, Any]:
         raw_boxes, raw_scores, raw_labels = self.engine.predict_tiles(
@@ -91,6 +107,14 @@ class InferencePipeline:
             self.slicer.generate_tiles(image),
             conf_thr=self.conf_thr,
         )
+
+        if self.include_full_inference:
+            fi_boxes, fi_scores, fi_labels = self.engine.predict_full_image(
+                image, conf_thr=self.conf_thr
+            )
+            raw_boxes += fi_boxes
+            raw_scores += fi_scores
+            raw_labels += fi_labels
 
         if raw_boxes:
             suppress_fn = _SUPPRESSION_REGISTRY[self.suppression]
