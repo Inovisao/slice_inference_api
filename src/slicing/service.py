@@ -10,11 +10,11 @@ from slicing.sahi import Sahi
 from slicing.asahi import Asahi
 
 
-def make_slicer(slicing_mode: str, overlap_percentage: float):
+def make_slicer(slicing_mode: str, overlap_ratio: float):
     slicing_config = SlicingConfig(
         slicing_mode=slicing_mode,
         tile_size=(640, 640),
-        overlap_percentage=overlap_percentage,
+        overlap_ratio=overlap_ratio,
         min_object_coverage=0.5,
     )
     return Asahi(slicing_config) if slicing_mode == "asahi" else Sahi(slicing_config)
@@ -79,7 +79,7 @@ def save_slicing_config(
         p = metadata[0]["width"] if metadata else 0
         config.update({
             "tile_size": [p, p],
-            "overlap_percentage": slicer.overlap,
+            "overlap_ratio": slicer.overlap,
             "grid_cols": metadata[-1]["column_index"] + 1 if metadata else 0,
             "grid_rows": metadata[-1]["row_index"] + 1 if metadata else 0,
         })

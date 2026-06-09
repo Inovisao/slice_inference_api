@@ -5,7 +5,7 @@ dataset:
 slicing:
   mode: sahi           # sahi | asahi
   tile_size: [640, 640]
-  overlap_percentage: 0.15
+  overlap_ratio: 0.15
   min_object_coverage: 0.5
 
 crossfolds:
@@ -15,7 +15,7 @@ crossfolds:
   test_ratio: 0.15
 
 inference:
-  suppression: wbf     # nms | bws | nms_ioa | wbf
+  suppression: nms     # nms | bws | nms_ioa | wbf
   models_path: ./models
   output_results_path: ./output
   conf_threshold: 0.25

@@ -14,7 +14,7 @@ class Sahi:
 
     def compute_stride(self) -> Tuple[int, int]:
         tile_w, tile_h = self.slicing_config.tile_size
-        overlap = self.slicing_config.overlap_percentage
+        overlap = self.slicing_config.overlap_ratio
         return (
             max(1, tile_w - int(tile_w * overlap)),
             max(1, tile_h - int(tile_h * overlap)),

@@ -34,9 +34,9 @@ class ConfigLoader:
         if len(tile) != 2 or any(v <= 0 for v in tile):
             raise ValueError(f"slicing.tile_size must be [width, height] with positive values, got {tile}")
 
-        overlap = s.get("overlap_percentage", 0)
+        overlap = s.get("overlap_ratio", 0)
         if not (0.0 < overlap < 1.0):
-            raise ValueError(f"slicing.overlap_percentage must be in (0, 1), got {overlap}")
+            raise ValueError(f"slicing.overlap_ratio must be in (0, 1), got {overlap}")
 
         coverage = s.get("min_object_coverage", 0)
         if not (0.0 < coverage <= 1.0):
@@ -63,7 +63,7 @@ class ConfigLoader:
         return SlicingConfig(
             slicing_mode=s["mode"],
             tile_size=tuple(s["tile_size"]),
-            overlap_percentage=s["overlap_percentage"],
+            overlap_ratio=s["overlap_ratio"],
             min_object_coverage=s.get("min_object_coverage", 0.5),
         )
 

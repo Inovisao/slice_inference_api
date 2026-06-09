@@ -6,8 +6,13 @@ from typing import Tuple
 class SlicingConfig:
     slicing_mode: str
     tile_size: Tuple[int, int]
-    overlap_percentage: float
+    overlap_ratio: float
     min_object_coverage: float
+
+    def __post_init__(self):
+        assert 0.0 <= self.overlap_ratio < 1.0, (
+            f"overlap_ratio must be in [0, 1), got {self.overlap_ratio}"
+        )
 
 
 @dataclass

@@ -1,9 +1,10 @@
 from fastapi import FastAPI
 
-from .routers import slicing, inference, reconstruct, imgshow
+from .routers import slicing, inference, reconstruct, imgshow, dataset
 
 app = FastAPI()
 
+app.include_router(dataset.router)
 app.include_router(slicing.router)
 app.include_router(inference.router)
 app.include_router(reconstruct.router)

@@ -20,7 +20,7 @@ class InferenceRequest(BaseModel):
     conf: float = Field(default=0.25, gt=0.0, le=1.0)
     iou_thr: float = Field(default=0.45, gt=0.0, le=1.0)
     suppression: Literal["nms", "bws", "nms_ioa", "wbf", "cluster_diou_nms"] = "wbf"
-    overlap_percentage: float = Field(default=0.15, gt=0.0, lt=1.0)
+    overlap_ratio: float = Field(default=0.15, gt=0.0, lt=1.0)
     device: Literal["cpu", "cuda"] = "cpu"
 
 
@@ -30,7 +30,7 @@ def _resolve_pipeline(request: InferenceRequest):
     return make_inference_pipeline(
         model_path=request.model_path,
         slicing_mode=request.slicing_mode,
-        overlap_percentage=request.overlap_percentage,
+        overlap_ratio=request.overlap_ratio,
         suppression=request.suppression,
         conf_thr=request.conf,
         iou_thr=request.iou_thr,

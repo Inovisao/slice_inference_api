@@ -27,13 +27,13 @@ router = APIRouter(prefix="/slicing", tags=["slicing"])
 
 class SlicingRequest(BaseModel):
     slicing_mode: Literal["sahi", "asahi"] = "sahi"
-    overlap_percentage: float = Field(default=0.15, gt=0.0, lt=1.0)
+    overlap_ratio: float = Field(default=0.15, gt=0.0, lt=1.0)
 
 
 class CrossFoldsRequest(BaseModel):
     slicing_mode: Literal["sahi", "asahi"] = "sahi"
     n_folds: int = Field(default=5, ge=3)
-    overlap_percentage: float = Field(default=0.15, gt=0.0, lt=1.0)
+    overlap_ratio: float = Field(default=0.15, gt=0.0, lt=1.0)
 
 
 @router.post("/single_image")
@@ -49,7 +49,7 @@ async def slicing_single_image(request: SlicingRequest = SlicingRequest()):
     base_path = os.path.join(OUTPUT_PATH, str(id_image))
     tiles_path = os.path.join(base_path, "tiles")
 
-    slicer = make_slicer(request.slicing_mode, request.overlap_percentage)
+    slicer = make_slicer(request.slicing_mode, request.overlap_ratio)
     metadata = slice_image(slicer, img, img_name, tiles_path)
     save_slicing_config(base_path, img_name, metadata, slicer, id_image=id_image)
 
@@ -79,7 +79,7 @@ async def slicing_dataset(request: SlicingRequest = SlicingRequest()):
         base_path = os.path.join(OUTPUT_PATH, str(id_image))
         tiles_path = os.path.join(base_path, "tiles")
 
-        slicer = make_slicer(request.slicing_mode, request.overlap_percentage)
+        slicer = make_slicer(request.slicing_mode, request.overlap_ratio)
         metadata = slice_image(slicer, img, img_name, tiles_path)
         save_slicing_config(base_path, img_name, metadata, slicer, id_image=id_image)
 
@@ -152,7 +152,7 @@ async def slicing_cross_folds(request: CrossFoldsRequest = CrossFoldsRequest()):
                 tiles_path = os.path.join(img_base, "tiles")
 
                 try:
-                    slicer = make_slicer(request.slicing_mode, request.overlap_percentage)
+                    slicer = make_slicer(request.slicing_mode, request.overlap_ratio)
                     metadata = slice_image(slicer, img, img_name, tiles_path)
                     save_slicing_config(img_base, img_name, metadata, slicer)
                     fold_tiles += len(metadata)
