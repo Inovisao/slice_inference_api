@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
@@ -13,9 +14,11 @@ from dataset.kfold_generator import AsahiKFoldValidator, GeometryParams, compute
 from dataset.preprocessor import DatasetPreprocessor
 from slicing.service import make_slicer
 
-_COCO_CLEAN = "_annotations_clean.coco.json"
-_COCO_RAW   = "_annotations.coco.json"
-_SEP        = "─" * 62
+_COCO_CLEAN    = "_annotations_clean.coco.json"
+_COCO_RAW      = "_annotations.coco.json"
+_SEP           = "─" * 62
+_JPEG_FACTOR   = 0.08   # empirical JPEG compression ratio for 640px tiles (~96 KB/tile)
+_LABEL_BYTES   = 512    # average .txt label file size per tile
 
 
 # ------------------------------------------------------------------ #
@@ -31,7 +34,6 @@ def _find_coco(dataset_path: str) -> Optional[str]:
 
 
 def _resolutions_from_coco(coco_path: str) -> Dict[Tuple[int, int], int]:
-    """Returns {(w, h): image_count} for entries that have width/height."""
     with open(coco_path, encoding="utf-8") as f:
         coco = json.load(f)
     counter: Counter = Counter()
@@ -43,13 +45,52 @@ def _resolutions_from_coco(coco_path: str) -> Dict[Tuple[int, int], int]:
 
 
 # ------------------------------------------------------------------ #
+# Disk estimation                                                      #
+# ------------------------------------------------------------------ #
+
+def _estimate_bytes_per_tile(tile_w: int, tile_h: int) -> int:
+    """Rough JPEG size estimate: raw pixels × compression factor + label overhead."""
+    return int(tile_w * tile_h * 3 * _JPEG_FACTOR) + _LABEL_BYTES
+
+
+def _estimate_process_gb(
+    resolutions: Dict[Tuple[int, int], int],
+    tile_w: int,
+    tile_h: int,
+    n_folds: int,
+    geoms: List[Tuple[Tuple[int, int], int, GeometryParams]],
+) -> float:
+    """
+    In k-fold every image is written n_folds times (n-1 as train + 1 as val).
+    total_bytes = Σ image_count × tiles_per_image × n_folds × bytes_per_tile
+    """
+    bytes_per_tile = _estimate_bytes_per_tile(tile_w, tile_h)
+    total = sum(
+        count * g.tiles_per_image * n_folds * bytes_per_tile
+        for (_, _), count, g in geoms
+    )
+    return total / 1e9
+
+
+def _free_gb(path: str) -> float:
+    anchor = path
+    while not os.path.exists(anchor):
+        anchor = os.path.dirname(anchor)
+        if anchor in ("", "/"):
+            anchor = "."
+            break
+    return shutil.disk_usage(anchor).free / 1e9
+
+
+# ------------------------------------------------------------------ #
 # Preview                                                              #
 # ------------------------------------------------------------------ #
 
-def _print_process_preview(proc: ProcessConfig):
-    s  = proc.slicing
-    d  = proc.dataset
-    cf = proc.crossfolds
+def _print_process_preview(proc: ProcessConfig) -> float:
+    """Prints config + geometry table. Returns estimated GB for this process."""
+    s   = proc.slicing
+    d   = proc.dataset
+    cf  = proc.crossfolds
     inf = proc.inference
 
     print(f"\n{'━' * 64}")
@@ -79,19 +120,20 @@ def _print_process_preview(proc: ProcessConfig):
     coco_path = _find_coco(d.input_path)
     if coco_path is None:
         print(f"\n  [!] COCO JSON não encontrado em '{d.input_path}' — geometria indisponível")
-        return
+        return 0.0
 
     resolutions = _resolutions_from_coco(coco_path)
     if not resolutions:
         print(f"\n  [!] Nenhuma imagem com width/height no JSON — execute o preprocessor primeiro")
-        return
+        return 0.0
 
     slicer = make_slicer(s.slicing_mode, s.overlap_ratio)
-    rows: List[Tuple[Tuple[int, int], int, GeometryParams]] = [
+    geoms: List[Tuple[Tuple[int, int], int, GeometryParams]] = [
         ((w, h), count, compute_geometry(slicer, w, h))
         for (w, h), count in sorted(resolutions.items())
     ]
 
+    # Geometry table
     print(f"\n  Geometria por resolução")
     print(f"  {_SEP}")
     print(
@@ -99,12 +141,24 @@ def _print_process_preview(proc: ProcessConfig):
         f"{'Cols':>5} {'Rows':>5} {'Tiles/img':>10} {'Redundância':>12}"
     )
     print(f"  {_SEP}")
-    for (w, h), count, g in rows:
+    for (w, h), count, g in geoms:
         print(
             f"  {f'{w}×{h}':<14} {count:>5} {g.tile_size_p:>7} "
             f"{g.cols:>5} {g.rows:>5} {g.tiles_per_image:>10} {g.redundancy_pct:>11.1f}%"
         )
     print(f"  {_SEP}")
+
+    # Disk estimate
+    estimated_gb = _estimate_process_gb(
+        resolutions, s.tile_size[0], s.tile_size[1], cf.n_folds, geoms
+    )
+    free_gb = _free_gb(d.output_path)
+    flag = "  [!] ESPAÇO INSUFICIENTE" if estimated_gb > free_gb else ""
+    print(f"\n  Disco")
+    print(f"    estimado para recorte  ~{estimated_gb:.1f} GB")
+    print(f"    livre em output        {free_gb:.1f} GB{flag}")
+
+    return estimated_gb
 
 
 # ------------------------------------------------------------------ #
@@ -182,8 +236,23 @@ def main():
     print(f"  Slice Inference API  —  {len(processes)} processo(s) configurado(s)")
     print(f"{'━' * 64}")
 
+    total_estimated_gb = 0.0
     for proc in processes:
-        _print_process_preview(proc)
+        total_estimated_gb += _print_process_preview(proc)
+
+    # Global disk summary
+    if total_estimated_gb > 0:
+        # Use the first output path as reference for total free space
+        ref_path = processes[0].dataset.output_path
+        free_gb = _free_gb(ref_path)
+        ok = total_estimated_gb <= free_gb
+        print(f"\n{'━' * 64}")
+        print(f"  Resumo de disco (todos os processos)")
+        print(f"    total estimado   ~{total_estimated_gb:.1f} GB")
+        print(f"    livre            {free_gb:.1f} GB")
+        if not ok:
+            print(f"    [!] Espaço insuficiente — libere pelo menos "
+                  f"{total_estimated_gb - free_gb:.1f} GB antes de continuar")
 
     print(f"\n{'━' * 64}")
     try:

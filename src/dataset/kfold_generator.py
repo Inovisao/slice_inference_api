@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import yaml
+from tqdm import tqdm
 from sklearn.model_selection import GroupKFold, KFold
 
 from config.settings import SlicingConfig
@@ -334,14 +335,16 @@ class AsahiKFoldValidator:
             annotations_discarded=annotations_original - annotations_kept,
         )
 
-    def _process_split(self, images: List[dict], split_dir: str) -> List[ImageMetrics]:
+    def _process_split(
+        self, images: List[dict], split_dir: str, desc: str = ""
+    ) -> List[ImageMetrics]:
         images_dir = os.path.join(split_dir, "images")
         labels_dir = os.path.join(split_dir, "labels")
         os.makedirs(images_dir, exist_ok=True)
         os.makedirs(labels_dir, exist_ok=True)
 
         metrics: List[ImageMetrics] = []
-        for img in images:
+        for img in tqdm(images, desc=f"    {desc}", unit="img", leave=False):
             m = self._process_image(img, images_dir, labels_dir)
             if m is not None:
                 metrics.append(m)
@@ -477,8 +480,8 @@ class AsahiKFoldValidator:
         train_dir = os.path.join(fold_dir, "train")
         val_dir = os.path.join(fold_dir, "val")
 
-        train_metrics = self._process_split(train_images, train_dir)
-        val_metrics = self._process_split(val_images, val_dir)
+        train_metrics = self._process_split(train_images, train_dir, f"fold {fold_index} train")
+        val_metrics   = self._process_split(val_images,   val_dir,   f"fold {fold_index} val  ")
         self._write_yaml(fold_index, train_dir, val_dir)
 
         return FoldStats(fold=fold_index, train_metrics=train_metrics, val_metrics=val_metrics)
