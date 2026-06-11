@@ -212,6 +212,8 @@ def _run_process(proc: ProcessConfig):
         output_root=d.output_path,
         seed=cf.seed,
         ioa_threshold=cf.ioa_threshold,
+        empty_tile_ratio=cf.empty_tile_ratio,
+        val_ratio=cf.val_ratio,
     )
     validator.run()
     print(f"\n  Processo {proc.index} concluído.")

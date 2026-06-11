@@ -8,12 +8,13 @@ processes:
       mode: sahi           # sahi | asahi
       tile_size: [640, 640]
       overlap_ratio: 0.1
-      min_object_coverage: 0.5
+      min_object_coverage: 0.4
 
     crossfolds:
       n_folds: 5
       seed: 42
       ioa_threshold: 0.2
+      empty_tile_ratio: 0.08
 
     inference:
       suppression: nms     # nms | bws | nms_ioa | wbf
@@ -34,12 +35,13 @@ processes:
       mode: asahi          # sahi | asahi
       tile_size: [640, 640]
       overlap_ratio: 0.15
-      min_object_coverage: 0.5
+      min_object_coverage: 0.4
 
     crossfolds:
       n_folds: 5
       seed: 42
       ioa_threshold: 0.2
+      empty_tile_ratio: 0.08
 
     inference:
       suppression: bws     # nms | bws | nms_ioa | wbf

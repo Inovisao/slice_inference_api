@@ -1,5 +1,6 @@
 import csv
 import json
+import math
 import os
 import shutil
 import time
@@ -19,6 +20,11 @@ from slicing.service import make_slicer
 _COCO_FILENAME = "_annotations.coco.json"
 _CLEAN_FILENAME = "_annotations_clean.coco.json"
 _DEFAULT_IOA_THRESHOLD = 0.20
+
+# (tile_img, stem, yolo_lines)
+_AnnotatedTile = Tuple[np.ndarray, str, List[str]]
+# (tile_img, stem)
+_EmptyTile = Tuple[np.ndarray, str]
 
 
 @dataclass
@@ -43,6 +49,8 @@ class ImageMetrics:
     annotations_original: int
     annotations_kept: int
     annotations_discarded: int
+    empty_tiles_kept: int = 0
+    empty_tiles_discarded: int = 0
 
     def to_row(self) -> dict:
         return {
@@ -54,11 +62,13 @@ class ImageMetrics:
             "annotations_original": self.annotations_original,
             "annotations_kept": self.annotations_kept,
             "annotations_discarded": self.annotations_discarded,
+            "empty_tiles_kept": self.empty_tiles_kept,
+            "empty_tiles_discarded": self.empty_tiles_discarded,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "ImageMetrics":
-        return cls(**d)
+        return cls(**{k: d[k] for k in cls.__dataclass_fields__ if k in d})
 
 
 @dataclass
@@ -66,6 +76,7 @@ class FoldStats:
     fold: int
     train_metrics: List[ImageMetrics] = field(default_factory=list)
     val_metrics: List[ImageMetrics] = field(default_factory=list)
+    test_metrics: List[ImageMetrics] = field(default_factory=list)
 
     @property
     def train_images(self) -> int:
@@ -76,6 +87,10 @@ class FoldStats:
         return len(self.val_metrics)
 
     @property
+    def test_images(self) -> int:
+        return len(self.test_metrics)
+
+    @property
     def train_tiles(self) -> int:
         return sum(m.tiles_generated for m in self.train_metrics)
 
@@ -83,14 +98,20 @@ class FoldStats:
     def val_tiles(self) -> int:
         return sum(m.tiles_generated for m in self.val_metrics)
 
+    @property
+    def test_tiles(self) -> int:
+        return sum(m.tiles_generated for m in self.test_metrics)
+
     def to_dict(self) -> dict:
-        all_m = self.train_metrics + self.val_metrics
+        all_m = self.train_metrics + self.val_metrics + self.test_metrics
         return {
             "fold": self.fold,
             "train_images": self.train_images,
             "val_images": self.val_images,
+            "test_images": self.test_images,
             "train_tiles": self.train_tiles,
             "val_tiles": self.val_tiles,
+            "test_tiles": self.test_tiles,
             "annotations_discarded": sum(m.annotations_discarded for m in all_m),
             "mean_slicing_time_ms": round(
                 sum(m.slicing_time_ms for m in all_m) / len(all_m), 2
@@ -102,6 +123,7 @@ class FoldStats:
             "fold": self.fold,
             "train_metrics": [m.to_row() for m in self.train_metrics],
             "val_metrics": [m.to_row() for m in self.val_metrics],
+            "test_metrics": [m.to_row() for m in self.test_metrics],
         }
 
     @classmethod
@@ -110,6 +132,7 @@ class FoldStats:
             fold=d["fold"],
             train_metrics=[ImageMetrics.from_dict(m) for m in d["train_metrics"]],
             val_metrics=[ImageMetrics.from_dict(m) for m in d["val_metrics"]],
+            test_metrics=[ImageMetrics.from_dict(m) for m in d.get("test_metrics", [])],
         )
 
 
@@ -146,6 +169,11 @@ class AsahiKFoldValidator:
     ASAHI tiling. Each fold materialises tiles on disk, writes a fold_{i}.yaml,
     and can be cleaned up after training to prevent cross-contamination.
 
+    Train split: letterbox FI image + tiled images (ASAHI resized with smart interpolation).
+                 Empty tiles sampled globally per fold at empty_tile_ratio.
+    Val/Test splits: original full-resolution images + YOLO labels normalised by original dims.
+                     No tiling — ultralytics letterboxes internally during evaluation.
+
     Expects COCO annotations at:
         dataset_path/_annotations_clean.coco.json  (preferred)
         dataset_path/_annotations.coco.json        (fallback)
@@ -154,6 +182,7 @@ class AsahiKFoldValidator:
         output_root/
           fold_{i}/train/images|labels
           fold_{i}/val/images|labels
+          fold_{i}/test/images|labels
           fold_{i}.yaml
           summary_report.json
           resolution_groups.csv
@@ -168,6 +197,8 @@ class AsahiKFoldValidator:
         output_root: str = "datasets/kfold_run",
         seed: int = 42,
         ioa_threshold: float = _DEFAULT_IOA_THRESHOLD,
+        empty_tile_ratio: float = 0.08,
+        val_ratio: float = 0.15,
         groups: Optional[Dict[str, str]] = None,
     ):
         self.dataset_path = dataset_path
@@ -176,9 +207,15 @@ class AsahiKFoldValidator:
         self.output_root = output_root
         self.seed = seed
         self.ioa_threshold = ioa_threshold
+        self.empty_tile_ratio = empty_tile_ratio
+        self.val_ratio = val_ratio
         self.groups = groups
 
+        self._target_size: Tuple[int, int] = slicing_config.tile_size  # (640, 640)
         self._slicer = make_slicer(slicing_config.slicing_mode, slicing_config.overlap_ratio)
+        self._is_asahi = isinstance(self._slicer, Asahi)
+        self._rng = np.random.default_rng(seed)
+
         self._coco = self._load_coco()
         self._category_map = self._build_category_map()
         self._ann_by_image = self._index_annotations()
@@ -228,7 +265,8 @@ class AsahiKFoldValidator:
 
     def _make_splits(
         self, images: List[dict]
-    ) -> List[Tuple[List[dict], List[dict]]]:
+    ) -> List[Tuple[List[dict], List[dict], List[dict]]]:
+        """Returns list of (train, val, test) triplets for each fold."""
         n = len(images)
 
         if self.groups is not None:
@@ -236,10 +274,17 @@ class AsahiKFoldValidator:
         else:
             raw = self._kfold(n)
 
-        return [
-            ([images[i] for i in train_idx], [images[i] for i in val_idx])
-            for train_idx, val_idx in raw
-        ]
+        # raw yields (train_idx, test_idx); carve val from the non-test pool
+        splits = []
+        for train_idx, test_idx in raw:
+            pool = [images[i] for i in train_idx]
+            test_imgs = [images[i] for i in test_idx]
+            n_val = max(1, round(len(pool) * self.val_ratio))
+            val_imgs = pool[:n_val]
+            train_imgs = pool[n_val:]
+            splits.append((train_imgs, val_imgs, test_imgs))
+
+        return splits
 
     def _kfold(self, n: int) -> List[Tuple[np.ndarray, np.ndarray]]:
         indices = np.arange(n)
@@ -258,7 +303,6 @@ class AsahiKFoldValidator:
     def _group_kfold(self, images: List[dict]) -> List[Tuple[np.ndarray, np.ndarray]]:
         group_labels = [self.groups.get(img["file_name"], img["file_name"]) for img in images]
         unique_groups = list(dict.fromkeys(group_labels))
-        # greedy: assign each group (largest first) to the fold with fewest samples
         group_sizes = {g: sum(1 for lbl in group_labels if lbl == g) for g in unique_groups}
         fold_counts = [0] * self.n_splits
         group_to_fold: Dict[str, int] = {}
@@ -331,12 +375,51 @@ class AsahiKFoldValidator:
         return f"{cls} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}"
 
     # ------------------------------------------------------------------ #
-    # Tile materialisation                                                 #
+    # Letterbox (FI)                                                       #
     # ------------------------------------------------------------------ #
 
-    def _process_image(
-        self, img_meta: dict, images_dir: str, labels_dir: str
-    ) -> Optional[ImageMetrics]:
+    def _letterbox(self, img: np.ndarray) -> Tuple[np.ndarray, int, int, float]:
+        """Resize mantendo proporção; preenche bordas com cinza 114."""
+        h, w = img.shape[:2]
+        tw, th = self._target_size
+        scale = min(tw / w, th / h)
+        nw, nh = int(w * scale), int(h * scale)
+        resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+        canvas = np.full((th, tw, 3), 114, dtype=np.uint8)
+        pad_x = (tw - nw) // 2
+        pad_y = (th - nh) // 2
+        canvas[pad_y:pad_y + nh, pad_x:pad_x + nw] = resized
+        return canvas, pad_x, pad_y, scale
+
+    def _fi_yolo_lines(
+        self, img_meta: dict, pad_x: int, pad_y: int, scale: float
+    ) -> List[str]:
+        """COCO bbox → YOLO normalizado no espaço do canvas letterboxado."""
+        tw, th = self._target_size
+        lines = []
+        for ann in self._ann_by_image.get(img_meta["id"], []):
+            bx, by, bw, bh = ann["bbox"]
+            if bw <= 0 or bh <= 0:
+                continue
+            cx = float(np.clip(((bx + bw / 2) * scale + pad_x) / tw, 0.0, 1.0))
+            cy = float(np.clip(((by + bh / 2) * scale + pad_y) / th, 0.0, 1.0))
+            w_n = float(np.clip(bw * scale / tw, 0.0, 1.0))
+            h_n = float(np.clip(bh * scale / th, 0.0, 1.0))
+            cls = self._category_map[ann["category_id"]]
+            lines.append(f"{cls} {cx:.6f} {cy:.6f} {w_n:.6f} {h_n:.6f}")
+        return lines
+
+    # ------------------------------------------------------------------ #
+    # Tile collection (train) — sem I/O                                   #
+    # ------------------------------------------------------------------ #
+
+    def _collect_tiles(
+        self, img_meta: dict
+    ) -> Optional[Tuple[List[_AnnotatedTile], List[_EmptyTile], ImageMetrics]]:
+        """
+        Lê a imagem, gera FI + tiles, classifica em annotated/empty.
+        Não escreve nada em disco — retorna listas para amostragem global.
+        """
         img_path = os.path.join(self.dataset_path, img_meta["file_name"])
         image = cv2.imread(img_path)
         if image is None:
@@ -346,12 +429,27 @@ class AsahiKFoldValidator:
         annotations = self._ann_by_image.get(img_meta["id"], [])
         stem = Path(img_meta["file_name"]).stem
         surviving_ann_ids: set = set()
-        tiles_written = 0
+
+        annotated: List[_AnnotatedTile] = []
+        empty: List[_EmptyTile] = []
 
         t0 = time.perf_counter()
+
+        # FI: letterbox da imagem original inteira
+        lb_img, pad_x, pad_y, scale = self._letterbox(image)
+        fi_lines = self._fi_yolo_lines(img_meta, pad_x, pad_y, scale)
+        annotated.append((lb_img, f"{stem}_fi", fi_lines))
+
+        # Tiles
+        tw, th = self._target_size
         for tile, coords in self._slicer.generate_tiles(image):
             x_off, y_off, p = coords["x"], coords["y"], coords["width"]
             tile_stem = f"{stem}_tile_{x_off}_{y_off}"
+
+            # ASAHI: resize com interpolação inteligente baseada na direção de escala
+            if self._is_asahi:
+                interp = cv2.INTER_AREA if p > tw else cv2.INTER_CUBIC
+                tile = cv2.resize(tile, (tw, th), interpolation=interp)
 
             yolo_lines: List[str] = []
             for ann in annotations:
@@ -362,10 +460,10 @@ class AsahiKFoldValidator:
                 cls = self._category_map[ann["category_id"]]
                 yolo_lines.append(self._yolo_line(clipped, p, cls))
 
-            cv2.imwrite(os.path.join(images_dir, f"{tile_stem}.jpg"), tile)
-            tiles_written += 1
-            with open(os.path.join(labels_dir, f"{tile_stem}.txt"), "w") as f:
-                f.write("\n".join(yolo_lines))
+            if yolo_lines:
+                annotated.append((tile, tile_stem, yolo_lines))
+            else:
+                empty.append((tile, tile_stem))
 
         slicing_time_ms = (time.perf_counter() - t0) * 1000
         self._get_geometry(img_w, img_h)
@@ -373,16 +471,84 @@ class AsahiKFoldValidator:
         annotations_original = len(annotations)
         annotations_kept = len(surviving_ann_ids)
 
-        return ImageMetrics(
+        metrics = ImageMetrics(
             image_name=img_meta["file_name"],
             width=img_w,
             height=img_h,
-            tiles_generated=tiles_written,
+            tiles_generated=len(annotated),  # actualizado após amostragem global
             slicing_time_ms=slicing_time_ms,
             annotations_original=annotations_original,
             annotations_kept=annotations_kept,
             annotations_discarded=annotations_original - annotations_kept,
         )
+        return annotated, empty, metrics
+
+    # ------------------------------------------------------------------ #
+    # Holdout split (val / test) — originais sem tiling                   #
+    # ------------------------------------------------------------------ #
+
+    def _write_holdout_split(
+        self, images: List[dict], split_dir: str, desc: str = ""
+    ) -> List[ImageMetrics]:
+        """
+        Copia originais intactos + labels YOLO normalizados pela resolução original.
+        Sem tiling, sem resize — ultralytics aplica letterbox internamente na avaliação.
+        """
+        images_dir = os.path.join(split_dir, "images")
+        labels_dir = os.path.join(split_dir, "labels")
+        os.makedirs(images_dir, exist_ok=True)
+        os.makedirs(labels_dir, exist_ok=True)
+
+        metrics: List[ImageMetrics] = []
+        for img_meta in tqdm(images, desc=f"    {desc}", unit="img", leave=False):
+            src = os.path.join(self.dataset_path, img_meta["file_name"])
+            if not os.path.isfile(src):
+                continue
+
+            shutil.copy2(src, os.path.join(images_dir, img_meta["file_name"]))
+
+            img_w = img_meta.get("width") or 0
+            img_h = img_meta.get("height") or 0
+
+            # Fallback: ler dimensões do disco se ausentes no JSON
+            if not img_w or not img_h:
+                probe = cv2.imread(src)
+                if probe is not None:
+                    img_h, img_w = probe.shape[:2]
+
+            anns = self._ann_by_image.get(img_meta["id"], [])
+            lines: List[str] = []
+            if img_w and img_h:
+                for ann in anns:
+                    bx, by, bw, bh = ann["bbox"]
+                    if bw <= 0 or bh <= 0:
+                        continue
+                    cx = float(np.clip((bx + bw / 2) / img_w, 0.0, 1.0))
+                    cy = float(np.clip((by + bh / 2) / img_h, 0.0, 1.0))
+                    w_n = float(np.clip(bw / img_w, 0.0, 1.0))
+                    h_n = float(np.clip(bh / img_h, 0.0, 1.0))
+                    cls = self._category_map[ann["category_id"]]
+                    lines.append(f"{cls} {cx:.6f} {cy:.6f} {w_n:.6f} {h_n:.6f}")
+
+            stem = Path(img_meta["file_name"]).stem
+            with open(os.path.join(labels_dir, f"{stem}.txt"), "w") as f:
+                f.write("\n".join(lines))
+
+            metrics.append(ImageMetrics(
+                image_name=img_meta["file_name"],
+                width=img_w,
+                height=img_h,
+                tiles_generated=1,
+                slicing_time_ms=0.0,
+                annotations_original=len(anns),
+                annotations_kept=len(lines),
+                annotations_discarded=0,
+            ))
+        return metrics
+
+    # ------------------------------------------------------------------ #
+    # Train split — buffer global + escrita consolidada                   #
+    # ------------------------------------------------------------------ #
 
     def _process_split(
         self, images: List[dict], split_dir: str, desc: str = ""
@@ -392,18 +558,62 @@ class AsahiKFoldValidator:
         os.makedirs(images_dir, exist_ok=True)
         os.makedirs(labels_dir, exist_ok=True)
 
-        metrics: List[ImageMetrics] = []
-        for img in tqdm(images, desc=f"    {desc}", unit="img", leave=False):
-            m = self._process_image(img, images_dir, labels_dir)
-            if m is not None:
-                metrics.append(m)
-        return metrics
+        global_annotated: List[_AnnotatedTile] = []
+        global_empty: List[_EmptyTile] = []
+        raw_metrics: List[ImageMetrics] = []
+
+        for img_meta in tqdm(images, desc=f"    {desc}", unit="img", leave=False):
+            result = self._collect_tiles(img_meta)
+            if result is None:
+                continue
+            annotated, empty, m = result
+            global_annotated.extend(annotated)
+            global_empty.extend(empty)
+            raw_metrics.append(m)
+
+        # Amostragem global após varredura completa do fold
+        n_keep = min(
+            math.ceil(len(global_annotated) * self.empty_tile_ratio),
+            len(global_empty),
+        )
+        chosen_idx = self._rng.choice(len(global_empty), n_keep, replace=False) if n_keep > 0 else []
+        sampled_empty = [global_empty[i] for i in chosen_idx]
+        n_discarded = len(global_empty) - n_keep
+
+        # Escrita consolidada em disco
+        for arr, stem, lines in global_annotated:
+            cv2.imwrite(os.path.join(images_dir, f"{stem}.jpg"), arr)
+            with open(os.path.join(labels_dir, f"{stem}.txt"), "w") as f:
+                f.write("\n".join(lines))
+
+        for arr, stem in sampled_empty:
+            cv2.imwrite(os.path.join(images_dir, f"{stem}.jpg"), arr)
+            open(os.path.join(labels_dir, f"{stem}.txt"), "w").close()
+
+        # Distribui contadores globais proporcionalmente entre as imagens
+        n_imgs = len(raw_metrics)
+        if n_imgs > 0:
+            kept_per_img = n_keep // n_imgs
+            disc_per_img = n_discarded // n_imgs
+            for m in raw_metrics:
+                m.empty_tiles_kept = kept_per_img
+                m.empty_tiles_discarded = disc_per_img
+            # Resto na primeira imagem
+            raw_metrics[0].empty_tiles_kept += n_keep % n_imgs
+            raw_metrics[0].empty_tiles_discarded += n_discarded % n_imgs
+
+        # Actualiza tiles_generated: anotados + vazios mantidos (proporcional)
+        total_written = len(global_annotated) + n_keep
+        for m in raw_metrics:
+            m.tiles_generated = total_written // n_imgs if n_imgs else 0
+
+        return raw_metrics
 
     # ------------------------------------------------------------------ #
     # YAML                                                                 #
     # ------------------------------------------------------------------ #
 
-    def _write_yaml(self, fold_index: int, train_dir: str, val_dir: str):
+    def _write_yaml(self, fold_index: int, train_dir: str, val_dir: str, test_dir: str):
         names = {
             i: cat["name"]
             for i, cat in enumerate(
@@ -414,6 +624,7 @@ class AsahiKFoldValidator:
             "path": str(Path(self.output_root).resolve()),
             "train": str((Path(train_dir) / "images").resolve()),
             "val": str((Path(val_dir) / "images").resolve()),
+            "test": str((Path(test_dir) / "images").resolve()),
             "nc": len(names),
             "names": names,
         }
@@ -426,10 +637,9 @@ class AsahiKFoldValidator:
     # ------------------------------------------------------------------ #
 
     def _write_reports(self, folds: List[FoldStats]):
-        # Deduplicate by image_name — same image appears in train/val across folds
         seen: Dict[str, ImageMetrics] = {}
         for fold in folds:
-            for m in fold.train_metrics + fold.val_metrics:
+            for m in fold.train_metrics + fold.val_metrics + fold.test_metrics:
                 if m.image_name not in seen:
                     seen[m.image_name] = m
 
@@ -456,6 +666,8 @@ class AsahiKFoldValidator:
             writer = csv.DictWriter(f, fieldnames=res_fields)
             writer.writeheader()
             for (w, h), count in sorted(res_count.items()):
+                if (w, h) not in self._geometry_cache:
+                    continue
                 geom = self._geometry_cache[(w, h)]
                 writer.writerow({
                     "resolution": f"{w}x{h}",
@@ -470,12 +682,14 @@ class AsahiKFoldValidator:
 
         # summary_report.json
         all_fold_metrics = [
-            m for fold in folds for m in fold.train_metrics + fold.val_metrics
+            m for fold in folds for m in fold.train_metrics + fold.val_metrics + fold.test_metrics
         ]
         total_tiles_all_folds = sum(m.tiles_generated for m in all_fold_metrics)
         slicing_times = [m.slicing_time_ms for m in unique_metrics]
         orig_annotations = sum(m.annotations_original for m in unique_metrics)
         discarded = sum(m.annotations_discarded for m in unique_metrics)
+        total_empty_kept = sum(m.empty_tiles_kept for m in unique_metrics)
+        total_empty_discarded = sum(m.empty_tiles_discarded for m in unique_metrics)
 
         summary = {
             "slicing_mode": self.slicing_config.slicing_mode,
@@ -487,6 +701,11 @@ class AsahiKFoldValidator:
                 "mean_tiles_per_image": round(
                     total_tiles_all_folds / len(unique_metrics), 2
                 ),
+            },
+            "tile_filtering": {
+                "empty_tile_ratio": self.empty_tile_ratio,
+                "empty_tiles_kept": total_empty_kept,
+                "empty_tiles_discarded": total_empty_discarded,
             },
             "time_profiling_ms": {
                 "mean_slicing_time_cpu": round(float(np.mean(slicing_times)), 2),
@@ -537,17 +756,31 @@ class AsahiKFoldValidator:
         fold_index: int,
         train_images: List[dict],
         val_images: List[dict],
+        test_images: Optional[List[dict]] = None,
     ) -> FoldStats:
         """Materialises one fold on disk and writes its fold_{i}.yaml."""
         fold_dir = os.path.join(self.output_root, f"fold_{fold_index}")
         train_dir = os.path.join(fold_dir, "train")
         val_dir = os.path.join(fold_dir, "val")
+        test_dir = os.path.join(fold_dir, "test")
 
-        train_metrics = self._process_split(train_images, train_dir, f"fold {fold_index} train")
-        val_metrics   = self._process_split(val_images,   val_dir,   f"fold {fold_index} val  ")
-        self._write_yaml(fold_index, train_dir, val_dir)
+        train_metrics = self._process_split(
+            train_images, train_dir, f"fold {fold_index} train"
+        )
+        val_metrics = self._write_holdout_split(
+            val_images, val_dir, f"fold {fold_index} val  "
+        )
+        test_metrics = self._write_holdout_split(
+            test_images or [], test_dir, f"fold {fold_index} test "
+        )
+        self._write_yaml(fold_index, train_dir, val_dir, test_dir)
 
-        stats = FoldStats(fold=fold_index, train_metrics=train_metrics, val_metrics=val_metrics)
+        stats = FoldStats(
+            fold=fold_index,
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+        )
         self._save_fold_stats(stats)
         return stats
 
@@ -579,7 +812,9 @@ class AsahiKFoldValidator:
         os.makedirs(self.output_root, exist_ok=True)
         results: List[FoldStats] = []
 
-        for fold_index, (train_imgs, val_imgs) in enumerate(self._make_splits(images), start=1):
+        for fold_index, (train_imgs, val_imgs, test_imgs) in enumerate(
+            self._make_splits(images), start=1
+        ):
             if fold_index < resume_from:
                 stats = self._load_fold_stats(fold_index)
                 if stats is None:
@@ -588,17 +823,18 @@ class AsahiKFoldValidator:
                         f"run scripts/reconstruct_fold_stats.py first."
                     )
                 print(f"[Fold {fold_index}/{self.n_splits}] Skipping (loaded from disk).")
-                # warm geometry cache for resolutions seen in loaded folds
-                for m in stats.train_metrics + stats.val_metrics:
+                for m in stats.train_metrics + stats.val_metrics + stats.test_metrics:
                     if m.width and m.height:
                         self._get_geometry(m.width, m.height)
                 results.append(stats)
                 continue
+
             print(f"[Fold {fold_index}/{self.n_splits}] Generating tiles...")
-            stats = self.generate_fold(fold_index, train_imgs, val_imgs)
+            stats = self.generate_fold(fold_index, train_imgs, val_imgs, test_imgs)
             print(
                 f"  train {stats.train_tiles} tiles / {stats.train_images} images  |  "
-                f"val {stats.val_tiles} tiles / {stats.val_images} images"
+                f"val {stats.val_tiles} imgs / {stats.val_images} images  |  "
+                f"test {stats.test_tiles} imgs / {stats.test_images} images"
             )
             results.append(stats)
 

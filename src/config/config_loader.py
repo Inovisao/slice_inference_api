@@ -85,6 +85,7 @@ class ConfigLoader:
             train_ratio=cf.get("train_ratio", 0.70),
             val_ratio=cf.get("val_ratio", 0.15),
             test_ratio=cf.get("test_ratio", 0.15),
+            empty_tile_ratio=cf.get("empty_tile_ratio", 0.08),
         )
 
         inf = raw.get("inference", {})
