@@ -11,7 +11,6 @@ import cv2
 import numpy as np
 import yaml
 from tqdm import tqdm
-from sklearn.model_selection import GroupKFold, KFold
 
 from config.settings import SlicingConfig
 from slicing.asahi import Asahi
@@ -57,6 +56,10 @@ class ImageMetrics:
             "annotations_discarded": self.annotations_discarded,
         }
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "ImageMetrics":
+        return cls(**d)
+
 
 @dataclass
 class FoldStats:
@@ -93,6 +96,21 @@ class FoldStats:
                 sum(m.slicing_time_ms for m in all_m) / len(all_m), 2
             ) if all_m else 0.0,
         }
+
+    def to_full_dict(self) -> dict:
+        return {
+            "fold": self.fold,
+            "train_metrics": [m.to_row() for m in self.train_metrics],
+            "val_metrics": [m.to_row() for m in self.val_metrics],
+        }
+
+    @classmethod
+    def from_full_dict(cls, d: dict) -> "FoldStats":
+        return cls(
+            fold=d["fold"],
+            train_metrics=[ImageMetrics.from_dict(m) for m in d["train_metrics"]],
+            val_metrics=[ImageMetrics.from_dict(m) for m in d["val_metrics"]],
+        )
 
 
 def compute_geometry(slicer, img_w: int, img_h: int) -> "GeometryParams":
@@ -211,21 +229,52 @@ class AsahiKFoldValidator:
     def _make_splits(
         self, images: List[dict]
     ) -> List[Tuple[List[dict], List[dict]]]:
-        indices = np.arange(len(images))
+        n = len(images)
 
         if self.groups is not None:
-            group_labels = np.array(
-                [self.groups.get(img["file_name"], img["file_name"]) for img in images]
-            )
-            splitter = GroupKFold(n_splits=self.n_splits)
-            raw = list(splitter.split(indices, groups=group_labels))
+            raw = self._group_kfold(images)
         else:
-            splitter = KFold(n_splits=self.n_splits, shuffle=True, random_state=self.seed)
-            raw = list(splitter.split(indices))
+            raw = self._kfold(n)
 
         return [
             ([images[i] for i in train_idx], [images[i] for i in val_idx])
             for train_idx, val_idx in raw
+        ]
+
+    def _kfold(self, n: int) -> List[Tuple[np.ndarray, np.ndarray]]:
+        indices = np.arange(n)
+        np.random.default_rng(self.seed).shuffle(indices)
+        fold_sizes = np.full(self.n_splits, n // self.n_splits)
+        fold_sizes[: n % self.n_splits] += 1
+        chunks, cur = [], 0
+        for size in fold_sizes:
+            chunks.append(indices[cur : cur + size])
+            cur += size
+        return [
+            (np.concatenate([chunks[j] for j in range(self.n_splits) if j != i]), chunks[i])
+            for i in range(self.n_splits)
+        ]
+
+    def _group_kfold(self, images: List[dict]) -> List[Tuple[np.ndarray, np.ndarray]]:
+        group_labels = [self.groups.get(img["file_name"], img["file_name"]) for img in images]
+        unique_groups = list(dict.fromkeys(group_labels))
+        # greedy: assign each group (largest first) to the fold with fewest samples
+        group_sizes = {g: sum(1 for lbl in group_labels if lbl == g) for g in unique_groups}
+        fold_counts = [0] * self.n_splits
+        group_to_fold: Dict[str, int] = {}
+        for g in sorted(unique_groups, key=lambda g: -group_sizes[g]):
+            smallest = int(np.argmin(fold_counts))
+            group_to_fold[g] = smallest
+            fold_counts[smallest] += group_sizes[g]
+        fold_indices: List[List[int]] = [[] for _ in range(self.n_splits)]
+        for idx, g in enumerate(group_labels):
+            fold_indices[group_to_fold[g]].append(idx)
+        return [
+            (
+                np.array([idx for f2, chunk in enumerate(fold_indices) if f2 != f for idx in chunk]),
+                np.array(fold_indices[f]),
+            )
+            for f in range(self.n_splits)
         ]
 
     # ------------------------------------------------------------------ #
@@ -469,6 +518,20 @@ class AsahiKFoldValidator:
     # Public API                                                           #
     # ------------------------------------------------------------------ #
 
+    def _stats_path(self, fold_index: int) -> str:
+        return os.path.join(self.output_root, f"fold_{fold_index}_stats.json")
+
+    def _save_fold_stats(self, stats: FoldStats):
+        with open(self._stats_path(stats.fold), "w", encoding="utf-8") as f:
+            json.dump(stats.to_full_dict(), f, ensure_ascii=False)
+
+    def _load_fold_stats(self, fold_index: int) -> Optional[FoldStats]:
+        path = self._stats_path(fold_index)
+        if not os.path.isfile(path):
+            return None
+        with open(path, encoding="utf-8") as f:
+            return FoldStats.from_full_dict(json.load(f))
+
     def generate_fold(
         self,
         fold_index: int,
@@ -484,7 +547,9 @@ class AsahiKFoldValidator:
         val_metrics   = self._process_split(val_images,   val_dir,   f"fold {fold_index} val  ")
         self._write_yaml(fold_index, train_dir, val_dir)
 
-        return FoldStats(fold=fold_index, train_metrics=train_metrics, val_metrics=val_metrics)
+        stats = FoldStats(fold=fold_index, train_metrics=train_metrics, val_metrics=val_metrics)
+        self._save_fold_stats(stats)
+        return stats
 
     def cleanup_fold(self, fold_index: int):
         """Deletes the physical fold directory and any .cache files ultralytics
@@ -498,8 +563,13 @@ class AsahiKFoldValidator:
                 if fname.endswith(".cache"):
                     os.remove(os.path.join(root, fname))
 
-    def run(self) -> List[FoldStats]:
-        """Generates all folds on disk and writes experiment reports."""
+    def run(self, resume_from: int = 1) -> List[FoldStats]:
+        """Generates all folds on disk and writes experiment reports.
+
+        resume_from: skip folds with index < resume_from (1-based). Useful
+        when the pipeline was interrupted mid-run; the caller is responsible
+        for deleting any partial fold directory before resuming.
+        """
         images = self._valid_images()
         if len(images) < self.n_splits:
             raise ValueError(
@@ -510,6 +580,20 @@ class AsahiKFoldValidator:
         results: List[FoldStats] = []
 
         for fold_index, (train_imgs, val_imgs) in enumerate(self._make_splits(images), start=1):
+            if fold_index < resume_from:
+                stats = self._load_fold_stats(fold_index)
+                if stats is None:
+                    raise FileNotFoundError(
+                        f"fold_{fold_index}_stats.json not found in {self.output_root} — "
+                        f"run scripts/reconstruct_fold_stats.py first."
+                    )
+                print(f"[Fold {fold_index}/{self.n_splits}] Skipping (loaded from disk).")
+                # warm geometry cache for resolutions seen in loaded folds
+                for m in stats.train_metrics + stats.val_metrics:
+                    if m.width and m.height:
+                        self._get_geometry(m.width, m.height)
+                results.append(stats)
+                continue
             print(f"[Fold {fold_index}/{self.n_splits}] Generating tiles...")
             stats = self.generate_fold(fold_index, train_imgs, val_imgs)
             print(
