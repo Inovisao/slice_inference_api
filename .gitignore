@@ -4,3 +4,5 @@ dataset/*
 __pycache__
 */__pycache__
 output/*
+results/*
+pesos
