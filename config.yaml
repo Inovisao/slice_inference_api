@@ -14,6 +14,9 @@ processes:
       n_folds: 5
       seed: 42
       ioa_threshold: 0.2
+      train_ratio: 0.70
+      val_ratio: 0.15
+      test_ratio: 0.15
       empty_tile_ratio: 0.08
 
     inference:
@@ -41,6 +44,9 @@ processes:
       n_folds: 5
       seed: 42
       ioa_threshold: 0.2
+      train_ratio: 0.70
+      val_ratio: 0.15
+      test_ratio: 0.15
       empty_tile_ratio: 0.08
 
     inference:
