@@ -24,9 +24,12 @@ class DatasetConfig:
 @dataclass
 class CrossFoldsConfig:
     n_folds: int = 5
+    seed: int = 42
+    ioa_threshold: float = 0.20
     train_ratio: float = 0.70
     val_ratio: float = 0.15
     test_ratio: float = 0.15
+    empty_tile_ratio: float = 0.08
 
 
 @dataclass
