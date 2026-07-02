@@ -18,7 +18,6 @@ slicing_cfg = SlicingConfig(
     slicing_mode="asahi",
     tile_size=(640, 640),
     overlap_ratio=0.15,
-    min_object_coverage=0.5,
 )
 validator = AsahiKFoldValidator(
     dataset_path=os.path.join(ROOT, "dataset"),

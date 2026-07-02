@@ -3,8 +3,8 @@ import os
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from dataset.cleaner import DatasetCleaner
 from dataset.crossfold import CrossFoldSplitter
+from dataset.preprocessor import DatasetPreprocessor
 from dataset.validator import DatasetValidator
 
 from ..helpers import DATASET_PATH
@@ -37,10 +37,17 @@ async def clean_dataset_annotations():
             detail={"error": "Annotation file not found", "path": coco_path},
         )
 
-    return DatasetCleaner(DATASET_PATH).clean()
+    return DatasetPreprocessor(DATASET_PATH).run()
 
 
-@router.post("/crossfolds")
+@router.post(
+    "/crossfolds",
+    deprecated=True,
+    description=(
+        "Creates COCO split JSON files only. It does not create a trainable "
+        "tiled YOLO dataset; use `python main.py` for that."
+    ),
+)
 async def generate_crossfolds(request: CrossFoldRequest = CrossFoldRequest()):
     splitter = CrossFoldSplitter(DATASET_PATH)
 

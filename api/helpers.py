@@ -1,21 +1,19 @@
 import os
+from pathlib import Path
 from typing import List
 
 import cv2
 import numpy as np
 from fastapi import HTTPException
 from PIL import Image
+from config.config_loader import ConfigLoader
 
 _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
 
-DATASET_PATH = "./dataset"
-OUTPUT_PATH = "./output"
-MODELS_PATH = "./models"
-
-TRAIN_RATIO = 0.70
-VAL_RATIO = 0.15
-TEST_RATIO = 0.15
-
+_PATHS = ConfigLoader(Path(__file__).resolve().parents[1] / "config.yaml").paths
+DATASET_PATH = _PATHS.source_dataset
+OUTPUT_PATH = _PATHS.generated_datasets
+MODELS_PATH = _PATHS.models
 
 def list_images(path: str) -> List[str]:
     return [f for f in os.listdir(path) if f.lower().endswith(_IMAGE_EXTENSIONS)]

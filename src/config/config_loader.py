@@ -5,6 +5,7 @@ from typing import List
 import yaml
 
 from config.settings import (
+    AppPaths,
     CrossFoldsConfig,
     DataInferenceConfig,
     DatasetConfig,
@@ -40,8 +41,17 @@ class ConfigLoader:
     """
 
     def __init__(self, path: str = "config.yaml"):
-        raw = Path(path).read_text()
+        config_path = Path(path).resolve()
+        raw = config_path.read_text()
         cfg = yaml.safe_load(raw)
+
+        paths = cfg.get("paths", {})
+        self.paths = AppPaths(
+            source_dataset=paths.get("source_dataset", "./dataset"),
+            generated_datasets=paths.get("generated_datasets", "./output"),
+            models=paths.get("models", "./models"),
+            results=paths.get("results", "./results"),
+        )
 
         if "processes" not in cfg:
             raise ValueError(
@@ -74,7 +84,6 @@ class ConfigLoader:
             slicing_mode=s.get("mode", "sahi"),
             tile_size=tuple(s.get("tile_size", [640, 640])),
             overlap_ratio=s.get("overlap_ratio", 0.2),
-            min_object_coverage=s.get("min_object_coverage", 0.5),
         )
 
         cf = raw.get("crossfolds", {})
@@ -82,9 +91,7 @@ class ConfigLoader:
             n_folds=cf.get("n_folds", 5),
             seed=cf.get("seed", 42),
             ioa_threshold=cf.get("ioa_threshold", 0.2),
-            train_ratio=cf.get("train_ratio", 0.70),
             val_ratio=cf.get("val_ratio", 0.15),
-            test_ratio=cf.get("test_ratio", 0.15),
             empty_tile_ratio=cf.get("empty_tile_ratio", 0.08),
         )
 
@@ -92,14 +99,9 @@ class ConfigLoader:
         inference = DataInferenceConfig(
             slicing_mode=slicing.slicing_mode,
             suppression=inf.get("suppression", "nms"),
-            dataset_path=dataset.input_path,
-            models_path=inf.get("models_path", "./models"),
-            output_results_path=inf.get("output_results_path", "./output"),
             conf_threshold=inf.get("conf_threshold", 0.25),
             iou_threshold=inf.get("iou_threshold", 0.5),
             batch_size=inf.get("batch_size", 32),
-            num_workers=inf.get("num_workers", 4),
-            save_original_annotations=inf.get("save_original_annotations", True),
         )
 
         return ProcessConfig(
@@ -141,10 +143,20 @@ class ConfigLoader:
             raise ValueError(
                 f"[process {idx}] crossfolds.n_folds must be >= 2, got {cf.n_folds}"
             )
-        total = cf.train_ratio + cf.val_ratio + cf.test_ratio
-        if abs(total - 1.0) > 1e-6:
+        if not (0.0 < cf.val_ratio < 1.0):
             raise ValueError(
-                f"[process {idx}] crossfolds ratios must sum to 1.0, got {total:.6f}"
+                f"[process {idx}] crossfolds.val_ratio must be in (0, 1), "
+                f"got {cf.val_ratio}"
+            )
+        if not (0.0 < cf.ioa_threshold <= 1.0):
+            raise ValueError(
+                f"[process {idx}] crossfolds.ioa_threshold must be in (0, 1], "
+                f"got {cf.ioa_threshold}"
+            )
+        if not (0.0 <= cf.empty_tile_ratio <= 1.0):
+            raise ValueError(
+                f"[process {idx}] crossfolds.empty_tile_ratio must be in [0, 1], "
+                f"got {cf.empty_tile_ratio}"
             )
 
     def _validate_inference(self, inf: DataInferenceConfig, idx: int):
@@ -152,6 +164,21 @@ class ConfigLoader:
             raise ValueError(
                 f"[process {idx}] inference.suppression must be one of "
                 f"{_VALID_SUPPRESSIONS}, got '{inf.suppression}'"
+            )
+        if not (0.0 < inf.conf_threshold <= 1.0):
+            raise ValueError(
+                f"[process {idx}] inference.conf_threshold must be in (0, 1], "
+                f"got {inf.conf_threshold}"
+            )
+        if not (0.0 < inf.iou_threshold <= 1.0):
+            raise ValueError(
+                f"[process {idx}] inference.iou_threshold must be in (0, 1], "
+                f"got {inf.iou_threshold}"
+            )
+        if inf.batch_size < 1:
+            raise ValueError(
+                f"[process {idx}] inference.batch_size must be positive, "
+                f"got {inf.batch_size}"
             )
 
     # ------------------------------------------------------------------ #

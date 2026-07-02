@@ -105,7 +105,6 @@ def _print_process_preview(proc: ProcessConfig) -> float:
     print(f"    mode          {s.slicing_mode}")
     print(f"    tile_size     {s.tile_size[0]}×{s.tile_size[1]} px")
     print(f"    overlap       {s.overlap_ratio * 100:.0f}%")
-    print(f"    min_coverage  {s.min_object_coverage * 100:.0f}%")
 
     print(f"\n  K-Fold")
     print(f"    n_folds       {cf.n_folds}")
@@ -115,7 +114,7 @@ def _print_process_preview(proc: ProcessConfig) -> float:
     print(f"\n  Inferência")
     print(f"    suppression   {inf.suppression}")
     print(f"    conf          {inf.conf_threshold}  |  iou {inf.iou_threshold}")
-    print(f"    batch_size    {inf.batch_size}  |  workers {inf.num_workers}")
+    print(f"    batch_size    {inf.batch_size}")
 
     coco_path = _find_coco(d.input_path)
     if coco_path is None:
@@ -203,7 +202,6 @@ def _run_process(proc: ProcessConfig):
         slicing_mode=s.slicing_mode,
         tile_size=s.tile_size,
         overlap_ratio=s.overlap_ratio,
-        min_object_coverage=s.min_object_coverage,
     )
     validator = AsahiKFoldValidator(
         dataset_path=d.input_path,

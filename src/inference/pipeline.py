@@ -1,10 +1,8 @@
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
-from inference.engine import TileInferenceEngine
 from inference.visualizer import draw_detections
-from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -12,15 +10,23 @@ class Slicer(Protocol):
     def generate_tiles(self, image): ...
 
 
+@runtime_checkable
+class InferenceEngine(Protocol):
+    class_names: dict
+
+    def predict_tiles(self, image, tile_generator, conf_thr=0.25, batch_size=32): ...
+
+    def predict_full_image(self, image, conf_thr=0.25): ...
+
+
 def _apply_nms(
     boxes: np.ndarray, scores: np.ndarray, labels: np.ndarray, iou_thr: float
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     from suppression.nms import nms
 
-    kept_boxes, kept_scores = nms(boxes, scores, iou_thresh=iou_thr)
-    # Recover labels for kept boxes by matching position
-    kept_labels = _recover_labels(boxes, kept_boxes, labels)
-    return kept_boxes, kept_scores, kept_labels
+    return _apply_per_class(
+        boxes, scores, labels, lambda b, s: nms(b, s, iou_thresh=iou_thr)
+    )
 
 
 def _apply_bws(
@@ -28,9 +34,9 @@ def _apply_bws(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     from suppression.bws import bws
 
-    kept_boxes, kept_scores = bws(boxes, scores, iou_thresh=iou_thr)
-    kept_labels = _recover_labels(boxes, kept_boxes, labels)
-    return kept_boxes, kept_scores, kept_labels
+    return _apply_per_class(
+        boxes, scores, labels, lambda b, s: bws(b, s, iou_thresh=iou_thr)
+    )
 
 
 def _apply_nms_ioa(
@@ -38,9 +44,29 @@ def _apply_nms_ioa(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     from suppression.nms_ioa import nms_ioa
 
-    kept_boxes, kept_scores = nms_ioa(boxes, scores, tau_0=iou_thr)
-    kept_labels = _recover_labels(boxes, kept_boxes, labels)
-    return kept_boxes, kept_scores, kept_labels
+    return _apply_per_class(
+        boxes, scores, labels, lambda b, s: nms_ioa(b, s, tau_0=iou_thr)
+    )
+
+
+def _apply_per_class(boxes, scores, labels, suppress):
+    """Applies a class-agnostic suppression function independently per class."""
+    out_boxes, out_scores, out_labels = [], [], []
+    for label in np.unique(labels):
+        mask = labels == label
+        class_boxes = boxes[mask]
+        kept_boxes, kept_scores = suppress(class_boxes, scores[mask])
+        out_boxes.extend(kept_boxes)
+        out_scores.extend(kept_scores)
+        out_labels.extend([int(label)] * len(kept_boxes))
+    if not out_boxes:
+        return np.empty((0, 4)), np.empty((0,)), np.empty((0,), dtype=int)
+    order = np.argsort(np.asarray(out_scores))[::-1]
+    return (
+        np.asarray(out_boxes)[order],
+        np.asarray(out_scores)[order],
+        np.asarray(out_labels, dtype=int)[order],
+    )
 
 
 def _apply_wbf(
@@ -49,17 +75,6 @@ def _apply_wbf(
     from suppression.wbf import wbf
 
     return wbf(boxes, scores, labels, iou_thr=iou_thr)
-
-
-def _recover_labels(
-    original_boxes: np.ndarray, kept_boxes: np.ndarray, labels: np.ndarray
-) -> np.ndarray:
-    """Recupera labels para caixas mantidas após supressão por correspondência de posição."""
-    recovered = []
-    for kb in kept_boxes:
-        dists = np.linalg.norm(original_boxes - kb, axis=1)
-        recovered.append(labels[np.argmin(dists)])
-    return np.array(recovered, dtype=int)
 
 
 def _apply_cluster_diou_nms(
@@ -82,12 +97,13 @@ _SUPPRESSION_REGISTRY = {
 class InferencePipeline:
     def __init__(
         self,
-        engine: TileInferenceEngine,
+        engine: InferenceEngine,
         slicer: Slicer,
         suppression: str = "wbf",
         conf_thr: float = 0.25,
         iou_thr: float = 0.45,
         include_full_inference: bool = False,
+        batch_size: int = 32,
     ):
         if suppression not in _SUPPRESSION_REGISTRY:
             raise ValueError(
@@ -100,12 +116,14 @@ class InferencePipeline:
         self.conf_thr = conf_thr
         self.iou_thr = iou_thr
         self.include_full_inference = include_full_inference
+        self.batch_size = batch_size
 
     def run(self, image: np.ndarray, out_path: str) -> dict[str, Any]:
         raw_boxes, raw_scores, raw_labels = self.engine.predict_tiles(
             image,
             self.slicer.generate_tiles(image),
             conf_thr=self.conf_thr,
+            batch_size=self.batch_size,
         )
 
         if self.include_full_inference:

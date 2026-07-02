@@ -1,3 +1,9 @@
+paths:
+  source_dataset: ./dataset
+  generated_datasets: ./output
+  models: ./models
+  results: ./results
+
 processes:
   - index: 1
     dataset:
@@ -5,29 +11,22 @@ processes:
       output_path: ./output/sahi
 
     slicing:
-      mode: sahi           # sahi | asahi
+      mode: sahi
       tile_size: [640, 640]
       overlap_ratio: 0.1
-      min_object_coverage: 0.4
 
     crossfolds:
       n_folds: 5
       seed: 42
       ioa_threshold: 0.2
-      train_ratio: 0.70
       val_ratio: 0.15
-      test_ratio: 0.15
       empty_tile_ratio: 0.08
 
     inference:
-      suppression: nms     # nms | bws | nms_ioa | wbf
-      models_path: ./models
-      output_results_path: ./output
-      conf_threshold: 0.25
+      suppression: nms
+      conf_threshold: 0.5
       iou_threshold: 0.5
       batch_size: 32
-      num_workers: 4
-      save_original_annotations: true
 
   - index: 2
     dataset:
@@ -35,26 +34,19 @@ processes:
       output_path: ./output/asahi
 
     slicing:
-      mode: asahi          # sahi | asahi
+      mode: asahi
       tile_size: [640, 640]
       overlap_ratio: 0.15
-      min_object_coverage: 0.4
 
     crossfolds:
       n_folds: 5
       seed: 42
       ioa_threshold: 0.2
-      train_ratio: 0.70
       val_ratio: 0.15
-      test_ratio: 0.15
       empty_tile_ratio: 0.08
 
     inference:
-      suppression: bws     # nms | bws | nms_ioa | wbf
-      models_path: ./models
-      output_results_path: ./output
-      conf_threshold: 0.25
+      suppression: cluster_diou_nms
+      conf_threshold: 0.5
       iou_threshold: 0.5
       batch_size: 32
-      num_workers: 4
-      save_original_annotations: true

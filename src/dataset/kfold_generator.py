@@ -3,6 +3,7 @@ import json
 import math
 import os
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -257,11 +258,19 @@ class AsahiKFoldValidator:
 
     def _valid_images(self) -> List[dict]:
         """Images that exist on disk and have at least one annotation."""
-        return [
+        images = [
             img for img in self._coco["images"]
             if self._ann_by_image.get(img["id"])
             and os.path.isfile(os.path.join(self.dataset_path, img["file_name"]))
         ]
+        stems = [Path(img["file_name"]).stem for img in images]
+        duplicates = sorted({stem for stem in stems if stems.count(stem) > 1})
+        if duplicates:
+            raise ValueError(
+                "Image filenames must have unique stems to create YOLO labels; "
+                f"duplicates: {duplicates}"
+            )
+        return images
 
     def _make_splits(
         self, images: List[dict]
@@ -558,54 +567,56 @@ class AsahiKFoldValidator:
         os.makedirs(images_dir, exist_ok=True)
         os.makedirs(labels_dir, exist_ok=True)
 
-        global_annotated: List[_AnnotatedTile] = []
-        global_empty: List[_EmptyTile] = []
         raw_metrics: List[ImageMetrics] = []
+        empty_candidates: List[Tuple[str, str, int]] = []
+        annotated_count = 0
+        empty_dir = tempfile.mkdtemp(prefix=".empty_tiles_", dir=split_dir)
 
-        for img_meta in tqdm(images, desc=f"    {desc}", unit="img", leave=False):
-            result = self._collect_tiles(img_meta)
-            if result is None:
-                continue
-            annotated, empty, m = result
-            global_annotated.extend(annotated)
-            global_empty.extend(empty)
-            raw_metrics.append(m)
+        try:
+            for img_meta in tqdm(images, desc=f"    {desc}", unit="img", leave=False):
+                result = self._collect_tiles(img_meta)
+                if result is None:
+                    continue
+                annotated, empty, metrics = result
+                metric_index = len(raw_metrics)
+                raw_metrics.append(metrics)
 
-        # Amostragem global após varredura completa do fold
-        n_keep = min(
-            math.ceil(len(global_annotated) * self.empty_tile_ratio),
-            len(global_empty),
-        )
-        chosen_idx = self._rng.choice(len(global_empty), n_keep, replace=False) if n_keep > 0 else []
-        sampled_empty = [global_empty[i] for i in chosen_idx]
-        n_discarded = len(global_empty) - n_keep
+                # Annotated samples can be persisted immediately. This bounds
+                # memory usage to the tiles of one source image.
+                for arr, stem, lines in annotated:
+                    cv2.imwrite(os.path.join(images_dir, f"{stem}.jpg"), arr)
+                    with open(os.path.join(labels_dir, f"{stem}.txt"), "w") as f:
+                        f.write("\n".join(lines))
+                annotated_count += len(annotated)
 
-        # Escrita consolidada em disco
-        for arr, stem, lines in global_annotated:
-            cv2.imwrite(os.path.join(images_dir, f"{stem}.jpg"), arr)
-            with open(os.path.join(labels_dir, f"{stem}.txt"), "w") as f:
-                f.write("\n".join(lines))
+                # Empty samples are staged on disk until the global sample size
+                # is known; keeping every empty tile in RAM can exhaust memory.
+                for candidate_index, (arr, stem) in enumerate(empty):
+                    temp_name = f"{metric_index}_{candidate_index}_{stem}.jpg"
+                    temp_path = os.path.join(empty_dir, temp_name)
+                    cv2.imwrite(temp_path, arr)
+                    empty_candidates.append((temp_path, stem, metric_index))
 
-        for arr, stem in sampled_empty:
-            cv2.imwrite(os.path.join(images_dir, f"{stem}.jpg"), arr)
-            open(os.path.join(labels_dir, f"{stem}.txt"), "w").close()
+            n_keep = min(
+                math.ceil(annotated_count * self.empty_tile_ratio),
+                len(empty_candidates),
+            )
+            chosen = set(
+                self._rng.choice(len(empty_candidates), n_keep, replace=False).tolist()
+                if n_keep > 0 else []
+            )
 
-        # Distribui contadores globais proporcionalmente entre as imagens
-        n_imgs = len(raw_metrics)
-        if n_imgs > 0:
-            kept_per_img = n_keep // n_imgs
-            disc_per_img = n_discarded // n_imgs
-            for m in raw_metrics:
-                m.empty_tiles_kept = kept_per_img
-                m.empty_tiles_discarded = disc_per_img
-            # Resto na primeira imagem
-            raw_metrics[0].empty_tiles_kept += n_keep % n_imgs
-            raw_metrics[0].empty_tiles_discarded += n_discarded % n_imgs
-
-        # Actualiza tiles_generated: anotados + vazios mantidos (proporcional)
-        total_written = len(global_annotated) + n_keep
-        for m in raw_metrics:
-            m.tiles_generated = total_written // n_imgs if n_imgs else 0
+            for candidate_index, (temp_path, stem, metric_index) in enumerate(empty_candidates):
+                metrics = raw_metrics[metric_index]
+                if candidate_index in chosen:
+                    shutil.move(temp_path, os.path.join(images_dir, f"{stem}.jpg"))
+                    open(os.path.join(labels_dir, f"{stem}.txt"), "w").close()
+                    metrics.empty_tiles_kept += 1
+                    metrics.tiles_generated += 1
+                else:
+                    metrics.empty_tiles_discarded += 1
+        finally:
+            shutil.rmtree(empty_dir, ignore_errors=True)
 
         return raw_metrics
 
@@ -760,6 +771,8 @@ class AsahiKFoldValidator:
     ) -> FoldStats:
         """Materialises one fold on disk and writes its fold_{i}.yaml."""
         fold_dir = os.path.join(self.output_root, f"fold_{fold_index}")
+        if os.path.isdir(fold_dir):
+            shutil.rmtree(fold_dir)
         train_dir = os.path.join(fold_dir, "train")
         val_dir = os.path.join(fold_dir, "val")
         test_dir = os.path.join(fold_dir, "test")

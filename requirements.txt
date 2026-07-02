@@ -1,5 +1,11 @@
+numpy
 opencv-python
 fastapi[standard]
+Pillow
 pyyaml
 ensemble-boxes
+torch
+torchvision
+tqdm
 ultralytics
+pytest

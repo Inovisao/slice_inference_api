@@ -1,331 +1,298 @@
 # Slice Inference API
 
-Pipeline de detecção de pequenos insetos em imagens agrícolas de alta resolução (4032×2268) usando **Slicing-based Inference** com YOLOv8.
+Ferramentas para preparar datasets e detectar pequenos objetos em imagens de alta
+resolução por inferência fatiada. O repositório cobre quatro etapas diferentes:
 
-Fazer resize global da imagem para 640×640 destrói a escala dos insetos. A solução é fatiar a imagem em tiles e inferir sobre cada tile — recontextualizando as detecções na imagem original.
+```text
+imagens + anotações COCO
+          │
+          ▼
+limpeza, recorte e geração de folds YOLO       python main.py
+          │
+          ▼
+treinamento por fold                           python -m train.train
+          │
+          ▼
+checkpoint treinado
+          ├── inferência operacional           API FastAPI
+          └── avaliação cross-fold             geraResultados.py
+```
 
----
+O modelo não é treinado pela API. Primeiro se gera o dataset, depois se treina um
+modelo com cada `fold_N.yaml`; o checkpoint resultante é então usado na API ou na
+avaliação.
 
-## Início Rápido
+## Instalação
 
-**1. Instale as dependências:**
+Requer Python 3.10 ou mais recente.
+
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**2. Organize o dataset:**
+Para desenvolver ou executar testes:
+
+```bash
+pip install -r requirements-dev.txt
 ```
+
+## 1. Dataset de entrada
+
+A preparação exige imagens e um arquivo COCO. O arquivo original nunca é
+sobrescrito.
+
+```text
 dataset/
+├── _annotations.coco.json
 ├── imagem_01.jpg
 ├── imagem_02.jpg
 └── ...
-
-models/
-└── best.pt       # modelo YOLOv8 treinado
 ```
 
-**3. Configure o `config.yaml`** conforme o modo desejado (`sahi` ou `asahi`) e ajuste `overlap_ratio`.
+Durante o preprocessamento são removidas referências inválidas e caixas
+degeneradas, caixas que ultrapassam a imagem são limitadas às suas dimensões e o
+resultado é salvo como `dataset/_annotations_clean.coco.json`.
 
-**4. Suba a API:**
+Para usar apenas a inferência, `dataset/` pode conter somente imagens.
+
+## 2. Configuração
+
+`config.yaml` possui caminhos globais e uma lista de processos. O arquivo atual
+gera experimentos SAHI e ASAHI separadamente.
+
+```yaml
+paths:
+  source_dataset: ./dataset
+  generated_datasets: ./output
+  models: ./models
+  results: ./results
+
+processes:
+  - index: 1
+    dataset:
+      input_path: ./dataset
+      output_path: ./output/sahi
+    slicing:
+      mode: sahi
+      tile_size: [640, 640]
+      overlap_ratio: 0.1
+    crossfolds:
+      n_folds: 5
+      seed: 42
+      ioa_threshold: 0.2
+      val_ratio: 0.15
+      empty_tile_ratio: 0.08
+    inference:
+      suppression: nms
+      conf_threshold: 0.5
+      iou_threshold: 0.5
+      batch_size: 32
+```
+
+`val_ratio` é a fração retirada do conjunto que sobra depois da seleção do teste.
+No K-fold, a fração de teste é `1 / n_folds`; portanto ela não é configurada
+separadamente. `ioa_threshold` é a cobertura mínima da anotação original exigida
+para manter uma caixa cortada. `empty_tile_ratio` limita a quantidade de tiles
+sem objetos em relação aos exemplos anotados.
+
+Os caminhos globais são usados pela API, treinamento e avaliação. Cada processo
+mantém seu próprio `dataset.output_path`, pois os folds SAHI e ASAHI são distintos.
+
+## 3. Gerar os datasets treináveis
+
+```bash
+python main.py
+```
+
+Antes de escrever, o comando mostra a geometria estimada, espaço em disco e pede
+confirmação. Para cada fold ele produz:
+
+```text
+output/sahi/
+├── fold_1/
+│   ├── train/images/    # imagem inteira letterbox + tiles anotados/amostrados
+│   ├── train/labels/    # labels YOLO correspondentes
+│   ├── val/images/      # imagens originais, sem recorte
+│   ├── val/labels/
+│   ├── test/images/     # imagens originais, sem recorte
+│   └── test/labels/
+├── fold_1.yaml
+├── fold_1_stats.json
+├── summary_report.json
+├── resolution_groups.csv
+└── per_image_metrics.csv
+```
+
+Somente o treino é materializado com tiles. Validação e teste preservam a
+resolução original e o framework de treinamento aplica seu próprio letterbox.
+Executar novamente um fold substitui a saída física daquele fold.
+
+### Endpoints de dataset que não substituem `main.py`
+
+- `POST /dataset/crossfolds` gera apenas divisões em JSON COCO.
+- `POST /slicing/dataset/crossFolds` gera apenas recortes exploratórios, sem labels.
+
+Ambos estão marcados como obsoletos no Swagger. Eles não produzem um dataset YOLO
+treinável.
+
+## 4. Treinar
+
+Treinar um fold com o modelo inicial incluído no repositório:
+
+```bash
+PYTHONPATH=src python -m train.train \
+  --data output/sahi/fold_1.yaml \
+  --mode sahi \
+  --model src/train/yolo26n.pt \
+  --epochs 100 \
+  --imgsz 640 \
+  --device 0
+```
+
+Treinar todos os folds configurados de um modo:
+
+```bash
+PYTHONPATH=src python -m train.train \
+  --all-folds \
+  --mode asahi \
+  --epochs 100 \
+  --device 0
+```
+
+A saída segue este contrato:
+
+```text
+models/sahi/fold_1/yolo/
+├── manifest.json
+└── train/weights/best.pt
+```
+
+O manifesto registra dataset, checkpoint e hiperparâmetros. Avaliações de Faster
+R-CNN e DETR também devem fornecer um manifesto na mesma estrutura, usando as
+pastas `faster_rcnn` e `detr` respectivamente.
+
+## 5. Inferência pela API
+
 ```bash
 bash run.sh
-# equivalente a:
-# PYTHONPATH=src uvicorn api.api:app --reload
 ```
 
-A API estará disponível em `http://localhost:8000`.  
-Documentação interativa (Swagger): `http://localhost:8000/docs`.
+- API: `http://localhost:8000`
+- Swagger: `http://localhost:8000/docs`
 
-**5. Execute uma inferência:**
+Inferência em uma imagem específica do dataset configurado:
+
 ```bash
 curl -X POST http://localhost:8000/inference/single_image \
   -H "Content-Type: application/json" \
   -d '{
-    "model_path": "./models/best.pt",
-    "slicing_mode": "asahi",
-    "overlap_ratio": 0.2,
-    "suppression": "wbf",
-    "conf": 0.25,
+    "model_path": "./models/sahi/fold_1/yolo/train/weights/best.pt",
+    "image_name": "imagem_01.jpg",
+    "slicing_mode": "sahi",
+    "overlap_ratio": 0.1,
+    "suppression": "nms",
+    "conf": 0.5,
+    "iou_thr": 0.5,
+    "batch_size": 32,
+    "include_full_image": false,
     "device": "cpu"
   }'
 ```
 
-**6. Fatiamento standalone** (sem inferência, para inspeção dos tiles):
-```bash
-curl -X POST http://localhost:8000/slicing/single_image \
-  -H "Content-Type: application/json" \
-  -d '{"slicing_mode": "asahi", "overlap_ratio": 0.2}'
+Se `image_name` for omitido, uma imagem é escolhida aleatoriamente. Se
+`include_full_image` for omitido, o padrão é `false` para SAHI e `true` para
+ASAHI. A inferência sobre os tiles sempre acontece; a passagem pela imagem
+inteira, quando habilitada, acontece exatamente uma vez.
+
+Resultados visuais são escritos em `paths.generated_datasets/<id>/`. Em
+`POST /inference/dataset`, o modelo é carregado uma única vez e cada falha é
+retornada em `failed_images` com sua causa.
+
+### Endpoints principais
+
+| Método | Endpoint | Finalidade |
+|---|---|---|
+| `GET` | `/dataset/validate` | Validar imagens e COCO |
+| `POST` | `/dataset/clean` | Gerar o COCO normalizado |
+| `POST` | `/slicing/single_image` | Inspecionar tiles de uma imagem aleatória |
+| `POST` | `/slicing/dataset` | Inspecionar tiles de todas as imagens |
+| `POST` | `/inference/single_image` | Inferir uma imagem |
+| `POST` | `/inference/dataset` | Inferir todo o diretório configurado |
+| `POST` | `/reconstruct/single_image` | Reconstruir tiles salvos |
+| `POST` | `/reconstruct/validate` | Inferir usando a configuração de um recorte salvo |
+
+A API operacional carrega checkpoints compatíveis com Ultralytics YOLO. Faster
+R-CNN e DETR são suportados no pipeline experimental de avaliação, não nesses
+endpoints.
+
+## Como a inferência funciona
+
+```text
+imagem original
+   ├── passagem inteira opcional ───────────────┐
+   └── SAHI/ASAHI → tiles → batches do modelo ─┤
+                                                ▼
+                              reprojeção para [0, 1]
+                                                ▼
+                         supressão por classe + visualização
 ```
 
-Os tiles e o JSON de metadados são salvos em `output/<id_image>/`.
-
----
-
-## Arquitetura (Clean Room)
-
-O pipeline é dividido em três módulos estritos, sem acoplamento entre eles:
-
-```
-Imagem Original (4032×2268)
-        │
-        ▼
-┌───────────────┐
-│    Slicer     │  Geometria pura. Usa yield — nunca carrega tudo na RAM.
-│  SAHI / ASAHI │  Retorna (tile, {x, y, width, height, ...}) por demanda.
-└───────┬───────┘
-        │ generator
-        ▼
-┌───────────────┐
-│ TileInference │  Acumula tiles em batches de 32 → 1 roundtrip GPU.
-│    Engine     │  model.predict(batch, imgsz=640) → xyxy no espaço do tile.
-└───────┬───────┘
-        │ raw_boxes (coordenadas normalizadas [0,1] na imagem original)
-        ▼
-┌───────────────┐
-│  Suppression  │  NMS / BWS / NMS-IoA / WBF / Cluster-DIoU-NMS
-│  + Visualizer │  Elimina duplicatas entre tiles sobrepostos.
-└───────────────┘
-```
-
----
-
-## Modos de Fatiamento
-
-### SAHI — Static Adaptive Head Inference (Fixed Slicing)
-
-Tile fixo (640×640) com stride calculado a partir de `overlap_ratio`.
-
-```
-stride_x = tile_w - int(tile_w × overlap_ratio)
-stride_y = tile_h - int(tile_h × overlap_ratio)
-```
-
-A grade é preenchida com ancoragem na borda direita/inferior, o que cria um **pico de sobreposição** nas margens — efeito inevitável quando a matemática não fecha com as dimensões da imagem.
-
-**Uso típico:** imagens menores ou quando a grade regular é requisito.
-
----
-
-### ASAHI — Adaptive SAHI (Adaptive Slicing)
-
-Tile adaptativo derivado das dimensões da imagem (Equações 1–4 do paper). O stride é um **número de ponto flutuante** distribuído uniformemente — sem `if` de borda, sem picos.
-
-**Cálculo do tile size `p`** para uma imagem W×H com overlap `l`:
-
-```
-ls = 640 × (4 - 3l) + 1
-
-se max(W, H) ≤ ls:
-    p = max(W / (3 - 2l) + 1,  H / (2 - l) + 1)
-senão:
-    p = max(W / (4 - 3l) + 1,  H / (3 - 2l) + 1)
-
-p = ceil(p)
-```
-
-**Cálculo da grade `a×b`:**
-
-```
-a = ceil((W - p·l) / (p·(1-l)))     ← colunas
-b = ceil((H - p·l) / (p·(1-l)))     ← linhas
-```
-
-**Posições dos tiles** (stride float, arredondado só no momento do corte):
-
-```
-x[i] = round(i × (W - p) / (a - 1))    para i in 0..a-1
-y[j] = round(j × (H - p) / (b - 1))    para j in 0..b-1
-```
-
-**Exemplo — 4032×2268 com `overlap_ratio=0.2`:**
-
-| Variável | Valor |
-|---|---|
-| `p` | 1187 px |
-| Grade | 4 × 3 = **12 tiles** |
-| `stride_x` (float) | 948.33 px |
-| `stride_y` (float) | 540.5 px |
-| Batches GPU | **1** (12 < batch_size=32) |
-
-O YOLO recebe tiles de 1187×1187, faz o resize `1187→640` internamente na GPU e devolve as `xyxy` no espaço do tile original. A reprojeção para a imagem global é `(bx + x_off) / img_w`.
-
-**Uso típico:** imagens agrícolas de alta resolução onde a redução de tiles é crítica para throughput.
-
----
-
-## Reprojeção de Coordenadas
-
-As boxes retornadas pelo YOLO estão no espaço do tile (e.g. 1187×1187 px). A reprojeção para a imagem original:
+Uma caixa do tile é reprojetada para a imagem original por:
 
 ```python
-gx1 = max(0.0, min(1.0, (bx1 + x_off) / img_w))
-gy1 = max(0.0, min(1.0, (by1 + y_off) / img_h))
-gx2 = max(0.0, min(1.0, (bx2 + x_off) / img_w))
-gy2 = max(0.0, min(1.0, (by2 + y_off) / img_h))
+gx1 = (tile_x1 + x_offset) / image_width
+gy1 = (tile_y1 + y_offset) / image_height
+gx2 = (tile_x2 + x_offset) / image_width
+gy2 = (tile_y2 + y_offset) / image_height
 ```
 
-As coordenadas resultantes são normalizadas `[0, 1]` relativas à imagem original.
+As supressões disponíveis são `nms`, `bws`, `nms_ioa`, `wbf` e
+`cluster_diou_nms`. Métodos originalmente agnósticos a classe são aplicados
+separadamente por classe.
 
----
+## SAHI e ASAHI
 
-## Métodos de Supressão
+SAHI significa *Slicing Aided Hyper Inference*. Neste projeto, o modo `sahi`
+implementa uma grade de tiles fixos, normalmente 640×640, com stride calculado a
+partir de `overlap_ratio`.
 
-| Método | Descrição |
-|---|---|
-| `nms` | Non-Maximum Suppression clássico |
-| `bws` | Box-Weighted Suppression |
-| `nms_ioa` | NMS com IoA (Intersection over Area) — favorece caixas pequenas |
-| `wbf` | Weighted Boxes Fusion — media ponderada das caixas sobrepostas |
-| `cluster_diou_nms` | Cluster + DIoU-NMS — usa distância euclidiana além de IoU |
+O modo `asahi` calcula um tile quadrado adaptativo a partir da resolução da
+imagem e distribui as posições uniformemente até as bordas. No dataset de treino,
+esses tiles são redimensionados para o `tile_size` configurado antes de serem
+gravados. Na inferência YOLO, o tile adaptativo é entregue ao Ultralytics com
+`imgsz=640`, que realiza o resize e devolve caixas no espaço do tile recebido.
 
----
+## Avaliação cross-fold
 
-## Configuração
+Depois que todos os manifests e checkpoints existirem:
 
-```yaml
-# config.yaml
-
-dataset:
-  input_path: ./dataset
-  output_path: ./output
-
-slicing:
-  mode: asahi              # sahi | asahi
-  tile_size: [640, 640]    # usado apenas no modo sahi
-  overlap_ratio: 0.2       # float em (0, 1) — usado nos dois modos
-  min_object_coverage: 0.5
-
-inference:
-  suppression: wbf         # nms | bws | nms_ioa | wbf | cluster_diou_nms
-  models_path: ./models
-  output_results_path: ./output
-  conf_threshold: 0.25
-  iou_threshold: 0.45
-  batch_size: 32
-  num_workers: 4
-  save_original_annotations: true
-
-crossfolds:
-  n_folds: 5
-  train_ratio: 0.70
-  val_ratio: 0.15
-  test_ratio: 0.15
+```bash
+python geraResultados.py
 ```
 
----
+O script avalia a imagem inteira e os tiles para YOLO, Faster R-CNN e DETR,
+aplica a supressão configurada e grava métricas e visualizações em `paths.results`.
+Um checkpoint ausente é relatado e o par arquitetura/fold é ignorado.
 
-## API Endpoints
+O preflight com ativos externos é executado separadamente:
 
-### Slicing
-
-| Método | Endpoint | Descrição |
-|---|---|---|
-| `POST` | `/slicing/single_image` | Fatiamento de 1 imagem aleatória do dataset |
-| `POST` | `/slicing/dataset` | Fatiamento de todo o dataset |
-| `POST` | `/slicing/dataset/crossFolds` | Fatiamento com cross-validation |
-
-**Payload (`SlicingRequest`):**
-```json
-{
-  "slicing_mode": "asahi",
-  "overlap_ratio": 0.2
-}
+```bash
+pytest -m integration
 ```
 
-**Payload (`CrossFoldsRequest`):**
-```json
-{
-  "slicing_mode": "asahi",
-  "n_folds": 5,
-  "overlap_ratio": 0.2
-}
+## Testes
+
+```bash
+pytest
 ```
 
----
+A suíte padrão não exige GPU, datasets reais ou checkpoints externos. Ela cobre
+geometria, geração de folds, formato de labels, inferência mockada, supressão,
+métricas e configuração.
 
-### Inference
+## Referências
 
-| Método | Endpoint | Descrição |
-|---|---|---|
-| `POST` | `/inference/single_image` | Inferência em 1 imagem aleatória do dataset |
-| `POST` | `/inference/dataset` | Inferência em todo o dataset |
-
-**Payload (`InferenceRequest`):**
-```json
-{
-  "model_path": "./models/best.pt",
-  "slicing_mode": "asahi",
-  "conf": 0.25,
-  "iou_thr": 0.45,
-  "suppression": "wbf",
-  "overlap_ratio": 0.2,
-  "device": "cuda"
-}
-```
-
-**Resposta:**
-```json
-{
-  "id_image": 42,
-  "image_name": "campo_01.jpg",
-  "slicing_mode": "asahi",
-  "detections": 17,
-  "raw_detections": 31,
-  "duplicates_removed": 14,
-  "scores": { "min": 0.261, "max": 0.941, "mean": 0.612 },
-  "output_path": "./output/42/campo_01_resultado.jpg"
-}
-```
-
----
-
-## Estrutura do Projeto
-
-```
-slice_inference_api/
-├── api/
-│   ├── routers/
-│   │   ├── inference.py     # Endpoints de inferência
-│   │   └── slicing.py       # Endpoints de fatiamento
-│   └── helpers.py
-├── src/
-│   ├── config/
-│   │   ├── settings.py      # DataClasses: SlicingConfig, DataInferenceConfig, ...
-│   │   └── config_loader.py # Leitura e validação do config.yaml
-│   ├── slicing/
-│   │   ├── sahi.py          # Motor geométrico SAHI (tile fixo, borda heurística)
-│   │   ├── asahi.py         # Motor geométrico ASAHI (tile adaptativo, stride float)
-│   │   └── service.py       # make_slicer(), slice_image(), save_slicing_config()
-│   ├── inference/
-│   │   ├── engine.py        # TileInferenceEngine — batching + reprojeção
-│   │   ├── pipeline.py      # InferencePipeline — orquestra engine + supressão
-│   │   ├── service.py       # make_inference_pipeline()
-│   │   └── visualizer.py    # draw_detections()
-│   └── suppression/
-│       ├── nms.py
-│       ├── bws.py
-│       ├── nms_ioa.py
-│       ├── wbf.py
-│       └── cluster_diou_nms.py
-├── config.yaml
-└── README.md
-```
-
----
-
-## Decisões de Design
-
-**Por que `imgsz=640` no engine e não `imgsz=p`?**
-O YOLO foi treinado em 640×640. Passar `imgsz=p` (e.g. 1187) forçaria a rede a operar em resolução diferente da de treino, degradando precisão. Com `imgsz=640`, o ultralytics faz o resize `p→640` na GPU antes da forward pass e devolve as boxes já remapeadas para o espaço do tile original — sem custo extra para o pipeline.
-
-**Por que não usar capping `min(p, 640)`?**
-Cappar `p` em 640 transforma o ASAHI em um SAHI com grade maior — perde a invariante de stride uniforme e multiplica o número de tiles, aumentando o custo de inferência desnecessariamente. O ASAHI é projetado para ter **menos tiles, maiores** — o downscale interno do YOLO é a abstração correta para esse tradeoff.
-
-**Por que generators no Slicer?**
-Para imagens 4032×2268 com tiles de 640×640, uma grade pode ter 40+ tiles. Materializar todos na RAM antes da inferência cria pico de memória. O generator entrega tiles sob demanda, permitindo que o engine os acumule em batches de forma streaming.
-
-
-### Referencias e Agradecimentos
-
-Asahi: https://arxiv.org/abs/2604.19233
-Sahi: https://ieeexplore.ieee.org/document/9897990
+- ASAHI: <https://arxiv.org/abs/2604.19233>
+- SAHI: <https://ieeexplore.ieee.org/document/9897990>

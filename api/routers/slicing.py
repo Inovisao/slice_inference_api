@@ -13,9 +13,6 @@ from slicing.service import make_slicer, slice_image, save_slicing_config
 from ..helpers import (
     DATASET_PATH,
     OUTPUT_PATH,
-    TRAIN_RATIO,
-    VAL_RATIO,
-    TEST_RATIO,
     next_id,
     read_image_or_raise,
     validate_dataset,
@@ -99,7 +96,14 @@ async def slicing_dataset(request: SlicingRequest = SlicingRequest()):
     }
 
 
-@router.post("/dataset/crossFolds")
+@router.post(
+    "/dataset/crossFolds",
+    deprecated=True,
+    description=(
+        "Exploratory image-only slicing. No YOLO labels are generated; "
+        "use `python main.py` to build trainable folds."
+    ),
+)
 async def slicing_cross_folds(request: CrossFoldsRequest = CrossFoldsRequest()):
     images = validate_dataset(DATASET_PATH)
 
@@ -172,6 +176,6 @@ async def slicing_cross_folds(request: CrossFoldsRequest = CrossFoldsRequest()):
     return {
         "n_folds": request.n_folds,
         "slicing_mode": request.slicing_mode,
-        "ratios": {"train": TRAIN_RATIO, "val": VAL_RATIO, "test": TEST_RATIO},
+        "note": "Exploratory image-only split; no trainable labels were generated.",
         "folds": folds_summary,
     }

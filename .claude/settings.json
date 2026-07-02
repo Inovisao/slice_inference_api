@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(nvidia-smi --query-gpu=utilization.gpu,utilization.memory,memory.used,memory.free --format=csv,noheader,nounits)",
+      "Bash(/home/neto/miniconda3/envs/slicing/bin/python3 -c ' *)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

@@ -20,6 +20,7 @@ class ReconstructRequest(BaseModel):
 
 class ReconstructValidateRequest(BaseModel):
     id_image: int
+    model_path: str | None = None
     suppression: Literal["nms", "bws", "nms_ioa", "wbf", "cluster_diou_nms"] = "wbf"
     conf: float = Field(default=0.25, gt=0.0, le=1.0)
     iou_thr: float = Field(default=0.45, gt=0.0, le=1.0)
@@ -70,7 +71,7 @@ async def reconstruct_validate(request: ReconstructValidateRequest):
     if not os.path.exists(img_path):
         raise HTTPException(status_code=404, detail={"error": f"Source image not found: {source_image}"})
 
-    model_path = os.path.join(MODELS_PATH, "best.pt")
+    model_path = request.model_path or os.path.join(MODELS_PATH, "best.pt")
     if not os.path.exists(model_path):
         raise HTTPException(status_code=404, detail={"error": f"Model not found: {model_path}"})
 

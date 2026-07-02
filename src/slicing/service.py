@@ -15,7 +15,6 @@ def make_slicer(slicing_mode: str, overlap_ratio: float):
         slicing_mode=slicing_mode,
         tile_size=(640, 640),
         overlap_ratio=overlap_ratio,
-        min_object_coverage=0.5,
     )
     return Asahi(slicing_config) if slicing_mode == "asahi" else Sahi(slicing_config)
 
