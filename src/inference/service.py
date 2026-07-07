@@ -23,7 +23,7 @@ def make_inference_pipeline(
         conf_thr=conf_thr,
         iou_thr=iou_thr,
         include_full_inference=(
-            slicing_mode == "asahi"
+            slicing_mode in ("asahi", "asahi_rect")
             if include_full_inference is None
             else include_full_inference
         ),

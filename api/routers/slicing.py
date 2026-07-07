@@ -23,12 +23,12 @@ router = APIRouter(prefix="/slicing", tags=["slicing"])
 
 
 class SlicingRequest(BaseModel):
-    slicing_mode: Literal["sahi", "asahi"] = "sahi"
+    slicing_mode: Literal["sahi", "asahi", "asahi_rect"] = "sahi"
     overlap_ratio: float = Field(default=0.15, gt=0.0, lt=1.0)
 
 
 class CrossFoldsRequest(BaseModel):
-    slicing_mode: Literal["sahi", "asahi"] = "sahi"
+    slicing_mode: Literal["sahi", "asahi", "asahi_rect"] = "sahi"
     n_folds: int = Field(default=5, ge=3)
     overlap_ratio: float = Field(default=0.15, gt=0.0, lt=1.0)
 

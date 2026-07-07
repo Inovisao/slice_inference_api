@@ -12,7 +12,7 @@ from config.settings import (
     SlicingConfig,
 )
 
-_VALID_SLICING_MODES = ("sahi", "asahi")
+_VALID_SLICING_MODES = ("sahi", "asahi", "asahi_rect")
 _VALID_SUPPRESSIONS = ("nms", "bws", "nms_ioa", "wbf", "cluster_diou_nms")
 
 

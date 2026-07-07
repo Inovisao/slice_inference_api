@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from slicing.asahi import Asahi
+from slicing.asahi_rect import AsahiRect
 from slicing.sahi import Sahi
 from config.settings import SlicingConfig
 
@@ -30,6 +31,13 @@ def _sahi_config(overlap: float) -> SlicingConfig:
     )
 
 
+def _asahi_rect_config(overlap: float) -> SlicingConfig:
+    return SlicingConfig(
+        slicing_mode="asahi_rect", tile_size=(640, 640),
+        overlap_ratio=overlap,
+    )
+
+
 def _blank_image(w: int, h: int) -> np.ndarray:
     return np.zeros((h, w, 3), dtype=np.uint8)
 
@@ -38,6 +46,37 @@ _IMAGE_SIZES_ASAHI = [(4032, 2268), (4000, 3000), (1920, 1080), (800, 600)]
 # SAHI uses fixed 640×640 tiles — only test images larger than the tile in both dims
 _IMAGE_SIZES_SAHI = [(4032, 2268), (4000, 3000), (1920, 1080)]
 _OVERLAPS = [0.1, 0.15, 0.2, 0.3]
+
+
+class TestAsahiRectGeometry:
+    def test_reference_image_uses_four_by_two_grid(self):
+        slicer = AsahiRect(_asahi_rect_config(0.15))
+        assert slicer.compute_grid(4032, 2268) == (4, 2)
+        assert slicer.compute_tile_size(4032, 2268, 4, 2) == (1136, 1226)
+
+    def test_reference_image_redundancy_is_about_twenty_two_percent(self):
+        slicer = AsahiRect(_asahi_rect_config(0.15))
+        tiles = list(slicer.generate_tiles(_blank_image(4032, 2268)))
+        total_area = sum(c["width"] * c["height"] for _, c in tiles)
+        redundancy = (total_area - 4032 * 2268) / (4032 * 2268)
+        assert len(tiles) == 8
+        assert redundancy == pytest.approx(0.2184, abs=0.001)
+
+    @pytest.mark.parametrize("img_w,img_h", _IMAGE_SIZES_ASAHI)
+    @pytest.mark.parametrize("overlap", _OVERLAPS)
+    def test_tiles_cover_bounds_with_uniform_stride(self, img_w, img_h, overlap):
+        slicer = AsahiRect(_asahi_rect_config(overlap))
+        tiles = list(slicer.generate_tiles(_blank_image(img_w, img_h)))
+        xs = sorted({c["x"] for _, c in tiles})
+        ys = sorted({c["y"] for _, c in tiles})
+        assert min(xs) == min(ys) == 0
+        for _, coords in tiles:
+            assert coords["x"] + coords["width"] <= img_w
+            assert coords["y"] + coords["height"] <= img_h
+        for positions in (xs, ys):
+            strides = [b - a for a, b in zip(positions, positions[1:])]
+            if len(strides) > 1:
+                assert max(strides) - min(strides) <= 1
 
 
 @pytest.mark.parametrize("img_w,img_h", _IMAGE_SIZES_ASAHI)

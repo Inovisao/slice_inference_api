@@ -18,8 +18,8 @@ processes:
     crossfolds:
       n_folds: 5
       seed: 42
-      ioa_threshold: 0.2
       val_ratio: 0.15
+      ioa_threshold: 0.4
       empty_tile_ratio: 0.08
 
     inference:
@@ -41,7 +41,30 @@ processes:
     crossfolds:
       n_folds: 5
       seed: 42
-      ioa_threshold: 0.2
+      ioa_threshold: 0.4
+      val_ratio: 0.15
+      empty_tile_ratio: 0.08
+
+    inference:
+      suppression: cluster_diou_nms
+      conf_threshold: 0.5
+      iou_threshold: 0.5
+      batch_size: 32
+
+  - index: 3
+    dataset:
+      input_path: ./dataset
+      output_path: ./output/asahi_rect
+
+    slicing:
+      mode: asahi_rect
+      tile_size: [640, 640]
+      overlap_ratio: 0.15
+
+    crossfolds:
+      n_folds: 5
+      seed: 42
+      ioa_threshold: 0.4
       val_ratio: 0.15
       empty_tile_ratio: 0.08
 

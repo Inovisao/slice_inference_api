@@ -17,7 +17,7 @@ router = APIRouter(prefix="/inference", tags=["inference"])
 class InferenceRequest(BaseModel):
     model_path: str
     image_name: str | None = None
-    slicing_mode: Literal["sahi", "asahi"] = "sahi"
+    slicing_mode: Literal["sahi", "asahi", "asahi_rect"] = "sahi"
     conf: float = Field(default=0.25, gt=0.0, le=1.0)
     iou_thr: float = Field(default=0.45, gt=0.0, le=1.0)
     suppression: Literal["nms", "bws", "nms_ioa", "wbf", "cluster_diou_nms"] = "wbf"
@@ -79,7 +79,7 @@ async def inference_single_image(request: InferenceRequest):
         "suppression": request.suppression,
         "conf_threshold": request.conf,
         "include_full_image": (
-            request.slicing_mode == "asahi"
+            request.slicing_mode in ("asahi", "asahi_rect")
             if request.include_full_image is None
             else request.include_full_image
         ),

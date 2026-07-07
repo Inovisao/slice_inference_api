@@ -8,6 +8,7 @@ import cv2
 from config.settings import SlicingConfig
 from slicing.sahi import Sahi
 from slicing.asahi import Asahi
+from slicing.asahi_rect import AsahiRect
 
 
 def make_slicer(slicing_mode: str, overlap_ratio: float):
@@ -16,7 +17,11 @@ def make_slicer(slicing_mode: str, overlap_ratio: float):
         tile_size=(640, 640),
         overlap_ratio=overlap_ratio,
     )
-    return Asahi(slicing_config) if slicing_mode == "asahi" else Sahi(slicing_config)
+    if slicing_mode == "asahi":
+        return Asahi(slicing_config)
+    if slicing_mode == "asahi_rect":
+        return AsahiRect(slicing_config)
+    return Sahi(slicing_config)
 
 
 def slice_image(slicer, image: cv2.typing.MatLike, image_name: str, output_path: str) -> List[Dict]:
@@ -74,10 +79,11 @@ def save_slicing_config(
         ],
     }
 
-    if slicing_mode == "asahi":
-        p = metadata[0]["width"] if metadata else 0
+    if slicing_mode in ("asahi", "asahi_rect"):
+        tile_w = metadata[0]["width"] if metadata else 0
+        tile_h = metadata[0]["height"] if metadata else 0
         config.update({
-            "tile_size": [p, p],
+            "tile_size": [tile_w, tile_h],
             "overlap_ratio": slicer.overlap,
             "grid_cols": metadata[-1]["column_index"] + 1 if metadata else 0,
             "grid_rows": metadata[-1]["row_index"] + 1 if metadata else 0,

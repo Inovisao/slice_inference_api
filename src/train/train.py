@@ -42,6 +42,8 @@ def train_fold(
     device: str,
     workers: int,
     seed: int,
+    fraction: float = 1.0,
+    val: bool = True,
 ) -> Path:
     data = data.resolve()
     if not data.is_file():
@@ -62,6 +64,8 @@ def train_fold(
         device=device,
         workers=workers,
         seed=seed,
+        fraction=fraction,
+        val=val,
         project=str(project),
         name="train",
         exist_ok=True,
@@ -91,6 +95,8 @@ def train_fold(
             "device": device,
             "workers": workers,
             "seed": seed,
+            "fraction": fraction,
+            "val": val,
         },
     }
     manifest_path = project / "manifest.json"
@@ -112,6 +118,8 @@ def train_many(datasets: Iterable[Path], args: argparse.Namespace) -> list[Path]
             device=args.device,
             workers=args.workers,
             seed=args.seed,
+            fraction=args.fraction,
+            val=not args.no_val,
         )
         for data in datasets
     ]
@@ -126,7 +134,9 @@ def parse_args() -> argparse.Namespace:
     source.add_argument(
         "--all-folds", action="store_true", help="Train every fold for --mode"
     )
-    parser.add_argument("--mode", choices=("sahi", "asahi"), required=True)
+    parser.add_argument(
+        "--mode", choices=("sahi", "asahi", "asahi_rect"), required=True
+    )
     parser.add_argument(
         "--model", type=Path, default=Path(__file__).with_name("yolo26n.pt")
     )
@@ -138,6 +148,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--fraction", type=float, default=1.0,
+        help="Fraction of training samples to use (useful for smoke tests).",
+    )
+    parser.add_argument("--no-val", action="store_true", help="Disable validation.")
     return parser.parse_args()
 
 

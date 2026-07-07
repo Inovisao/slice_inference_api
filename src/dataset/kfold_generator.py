@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 from config.settings import SlicingConfig
 from slicing.asahi import Asahi
+from slicing.asahi_rect import AsahiRect
 from slicing.service import make_slicer
 
 _COCO_FILENAME = "_annotations.coco.json"
@@ -32,7 +33,7 @@ _EmptyTile = Tuple[np.ndarray, str]
 class GeometryParams:
     width: int
     height: int
-    tile_size_p: int
+    tile_size_p: int | str
     cols: int
     rows: int
     tiles_per_image: int
@@ -139,7 +140,12 @@ class FoldStats:
 
 def compute_geometry(slicer, img_w: int, img_h: int) -> "GeometryParams":
     """Standalone helper — usable outside the validator context (e.g. in main.py)."""
-    if isinstance(slicer, Asahi):
+    if isinstance(slicer, AsahiRect):
+        cols, rows = slicer.compute_grid(img_w, img_h)
+        tile_w, tile_h = slicer.compute_tile_size(img_w, img_h, cols, rows)
+        p = f"{tile_w}x{tile_h}"
+        tile_area = tile_w * tile_h
+    elif isinstance(slicer, Asahi):
         p = slicer.compute_tile_size(img_w, img_h)
         cols, rows = slicer.compute_grid(img_w, img_h, p)
         tile_area = p * p
@@ -215,6 +221,7 @@ class AsahiKFoldValidator:
         self._target_size: Tuple[int, int] = slicing_config.tile_size  # (640, 640)
         self._slicer = make_slicer(slicing_config.slicing_mode, slicing_config.overlap_ratio)
         self._is_asahi = isinstance(self._slicer, Asahi)
+        self._is_asahi_rect = isinstance(self._slicer, AsahiRect)
         self._rng = np.random.default_rng(seed)
 
         self._coco = self._load_coco()
@@ -352,7 +359,8 @@ class AsahiKFoldValidator:
         bbox: Tuple[float, float, float, float],
         x_off: int,
         y_off: int,
-        p: int,
+        tile_w: int,
+        tile_h: int,
     ) -> Tuple[float, Tuple[float, float, float, float]]:
         """
         Returns (ioa, clipped_bbox_in_tile_coords).
@@ -366,8 +374,8 @@ class AsahiKFoldValidator:
 
         ix1 = max(bx, x_off)
         iy1 = max(by, y_off)
-        ix2 = min(bx + bw, x_off + p)
-        iy2 = min(by + bh, y_off + p)
+        ix2 = min(bx + bw, x_off + tile_w)
+        iy2 = min(by + bh, y_off + tile_h)
         iw = max(0.0, ix2 - ix1)
         ih = max(0.0, iy2 - iy1)
 
@@ -375,13 +383,33 @@ class AsahiKFoldValidator:
         return ioa, (ix1 - x_off, iy1 - y_off, iw, ih)
 
     def _yolo_line(
-        self, clipped: Tuple[float, float, float, float], p: int, cls: int
+        self,
+        clipped: Tuple[float, float, float, float],
+        tile_w: int,
+        tile_h: int,
+        cls: int,
     ) -> str:
-        cx = np.clip((clipped[0] + clipped[2] / 2) / p, 0.0, 1.0)
-        cy = np.clip((clipped[1] + clipped[3] / 2) / p, 0.0, 1.0)
-        w = np.clip(clipped[2] / p, 0.0, 1.0)
-        h = np.clip(clipped[3] / p, 0.0, 1.0)
+        cx = np.clip((clipped[0] + clipped[2] / 2) / tile_w, 0.0, 1.0)
+        cy = np.clip((clipped[1] + clipped[3] / 2) / tile_h, 0.0, 1.0)
+        w = np.clip(clipped[2] / tile_w, 0.0, 1.0)
+        h = np.clip(clipped[3] / tile_h, 0.0, 1.0)
         return f"{cls} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}"
+
+    def _letterboxed_yolo_line(
+        self,
+        clipped: Tuple[float, float, float, float],
+        pad_x: int,
+        pad_y: int,
+        scale: float,
+        cls: int,
+    ) -> str:
+        tw, th = self._target_size
+        x, y, w, h = clipped
+        cx = np.clip(((x + w / 2) * scale + pad_x) / tw, 0.0, 1.0)
+        cy = np.clip(((y + h / 2) * scale + pad_y) / th, 0.0, 1.0)
+        w_n = np.clip(w * scale / tw, 0.0, 1.0)
+        h_n = np.clip(h * scale / th, 0.0, 1.0)
+        return f"{cls} {cx:.6f} {cy:.6f} {w_n:.6f} {h_n:.6f}"
 
     # ------------------------------------------------------------------ #
     # Letterbox (FI)                                                       #
@@ -452,22 +480,38 @@ class AsahiKFoldValidator:
         # Tiles
         tw, th = self._target_size
         for tile, coords in self._slicer.generate_tiles(image):
-            x_off, y_off, p = coords["x"], coords["y"], coords["width"]
+            x_off, y_off = coords["x"], coords["y"]
+            tile_w, tile_h = coords["width"], coords["height"]
             tile_stem = f"{stem}_tile_{x_off}_{y_off}"
 
             # ASAHI: resize com interpolação inteligente baseada na direção de escala
             if self._is_asahi:
-                interp = cv2.INTER_AREA if p > tw else cv2.INTER_CUBIC
+                interp = cv2.INTER_AREA if tile_w > tw else cv2.INTER_CUBIC
                 tile = cv2.resize(tile, (tw, th), interpolation=interp)
+                tile_pad = None
+            elif self._is_asahi_rect:
+                tile, pad_x, pad_y, scale = self._letterbox(tile)
+                tile_pad = (pad_x, pad_y, scale)
+            else:
+                tile_pad = None
 
             yolo_lines: List[str] = []
             for ann in annotations:
-                ioa, clipped = self._ioa(tuple(ann["bbox"]), x_off, y_off, p)
+                ioa, clipped = self._ioa(
+                    tuple(ann["bbox"]), x_off, y_off, tile_w, tile_h
+                )
                 if ioa < self.ioa_threshold:
                     continue
                 surviving_ann_ids.add(ann["id"])
                 cls = self._category_map[ann["category_id"]]
-                yolo_lines.append(self._yolo_line(clipped, p, cls))
+                if tile_pad is not None:
+                    yolo_lines.append(
+                        self._letterboxed_yolo_line(clipped, *tile_pad, cls)
+                    )
+                else:
+                    yolo_lines.append(
+                        self._yolo_line(clipped, tile_w, tile_h, cls)
+                    )
 
             if yolo_lines:
                 annotated.append((tile, tile_stem, yolo_lines))

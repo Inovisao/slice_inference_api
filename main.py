@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import shutil
@@ -58,18 +59,34 @@ def _estimate_process_gb(
     tile_w: int,
     tile_h: int,
     n_folds: int,
+    val_ratio: float,
+    source_images_bytes: int,
     geoms: List[Tuple[Tuple[int, int], int, GeometryParams]],
 ) -> float:
     """
-    In k-fold every image is written n_folds times (n-1 as train + 1 as val).
-    total_bytes = Σ image_count × tiles_per_image × n_folds × bytes_per_tile
+    Conservative estimate including tiled train samples, one full-image (FI)
+    sample per training appearance and original holdout copies.
     """
     bytes_per_tile = _estimate_bytes_per_tile(tile_w, tile_h)
-    total = sum(
-        count * g.tiles_per_image * n_folds * bytes_per_tile
+    train_repetitions = (n_folds - 1) * (1 - val_ratio)
+    holdout_repetitions = 1 + (n_folds - 1) * val_ratio
+    train_bytes = sum(
+        count * (g.tiles_per_image + 1) * train_repetitions * bytes_per_tile
         for (_, _), count, g in geoms
     )
-    return total / 1e9
+    holdout_bytes = source_images_bytes * holdout_repetitions
+    return (train_bytes + holdout_bytes) / 1e9
+
+
+def _source_images_bytes(coco_path: str, dataset_path: str) -> int:
+    with open(coco_path, encoding="utf-8") as f:
+        coco = json.load(f)
+    total = 0
+    for image in coco.get("images", []):
+        path = os.path.join(dataset_path, image.get("file_name", ""))
+        if os.path.isfile(path):
+            total += os.path.getsize(path)
+    return total
 
 
 def _free_gb(path: str) -> float:
@@ -136,20 +153,26 @@ def _print_process_preview(proc: ProcessConfig) -> float:
     print(f"\n  Geometria por resolução")
     print(f"  {_SEP}")
     print(
-        f"  {'Resolução':<14} {'Imgs':>5} {'Tile p':>7} "
+        f"  {'Resolução':<14} {'Imgs':>5} {'Tile':>11} "
         f"{'Cols':>5} {'Rows':>5} {'Tiles/img':>10} {'Redundância':>12}"
     )
     print(f"  {_SEP}")
     for (w, h), count, g in geoms:
         print(
-            f"  {f'{w}×{h}':<14} {count:>5} {g.tile_size_p:>7} "
+            f"  {f'{w}×{h}':<14} {count:>5} {g.tile_size_p:>11} "
             f"{g.cols:>5} {g.rows:>5} {g.tiles_per_image:>10} {g.redundancy_pct:>11.1f}%"
         )
     print(f"  {_SEP}")
 
     # Disk estimate
     estimated_gb = _estimate_process_gb(
-        resolutions, s.tile_size[0], s.tile_size[1], cf.n_folds, geoms
+        resolutions,
+        s.tile_size[0],
+        s.tile_size[1],
+        cf.n_folds,
+        cf.val_ratio,
+        _source_images_bytes(coco_path, d.input_path),
+        geoms,
     )
     free_gb = _free_gb(d.output_path)
     flag = "  [!] ESPAÇO INSUFICIENTE" if estimated_gb > free_gb else ""
@@ -221,7 +244,21 @@ def _run_process(proc: ProcessConfig):
 # Entry point                                                          #
 # ------------------------------------------------------------------ #
 
-def main():
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Prepare sliced K-fold datasets.")
+    parser.add_argument(
+        "--process",
+        type=int,
+        action="append",
+        dest="processes",
+        help="Run only this process index (repeatable).",
+    )
+    parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt.")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = _parse_args(argv)
     cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
 
     try:
@@ -231,6 +268,14 @@ def main():
         sys.exit(1)
 
     processes = loader.processes
+    if args.processes:
+        requested = set(args.processes)
+        processes = [proc for proc in processes if proc.index in requested]
+        found = {proc.index for proc in processes}
+        missing = sorted(requested - found)
+        if missing:
+            print(f"[ERRO] Processo(s) inexistente(s): {missing}")
+            sys.exit(2)
 
     print(f"\n{'━' * 64}")
     print(f"  Slice Inference API  —  {len(processes)} processo(s) configurado(s)")
@@ -254,16 +299,17 @@ def main():
             print(f"    [!] Espaço insuficiente — libere pelo menos "
                   f"{total_estimated_gb - free_gb:.1f} GB antes de continuar")
 
-    print(f"\n{'━' * 64}")
-    try:
-        answer = input("  Confirmar recorte e geração das dobras? [s/N] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print("\n  Cancelado.")
-        return
+    if not args.yes:
+        print(f"\n{'━' * 64}")
+        try:
+            answer = input("  Confirmar recorte e geração das dobras? [s/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelado.")
+            return
 
-    if answer not in ("s", "sim", "y", "yes"):
-        print("  Cancelado.")
-        return
+        if answer not in ("s", "sim", "y", "yes"):
+            print("  Cancelado.")
+            return
 
     for proc in processes:
         _run_process(proc)

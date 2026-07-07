@@ -60,7 +60,8 @@ Para usar apenas a inferência, `dataset/` pode conter somente imagens.
 ## 2. Configuração
 
 `config.yaml` possui caminhos globais e uma lista de processos. O arquivo atual
-gera experimentos SAHI e ASAHI separadamente.
+gera experimentos SAHI, ASAHI quadrado e ASAHI retangular separadamente. Os três
+usam o mesmo dataset, seed e divisão das imagens originais.
 
 ```yaml
 paths:
@@ -81,7 +82,7 @@ processes:
     crossfolds:
       n_folds: 5
       seed: 42
-      ioa_threshold: 0.2
+      ioa_threshold: 0.4
       val_ratio: 0.15
       empty_tile_ratio: 0.08
     inference:
@@ -98,12 +99,20 @@ para manter uma caixa cortada. `empty_tile_ratio` limita a quantidade de tiles
 sem objetos em relação aos exemplos anotados.
 
 Os caminhos globais são usados pela API, treinamento e avaliação. Cada processo
-mantém seu próprio `dataset.output_path`, pois os folds SAHI e ASAHI são distintos.
+mantém seu próprio `dataset.output_path`, pois os tiles produzidos por cada modo
+são distintos. O processo `index: 3` usa `mode: asahi_rect` e grava em
+`./output/asahi_rect`.
 
 ## 3. Gerar os datasets treináveis
 
 ```bash
 python main.py
+```
+
+Para gerar somente o experimento retangular sem refazer os demais:
+
+```bash
+python main.py --process 3 --yes
 ```
 
 Antes de escrever, o comando mostra a geometria estimada, espaço em disco e pede
@@ -156,9 +165,18 @@ Treinar todos os folds configurados de um modo:
 ```bash
 PYTHONPATH=src python -m train.train \
   --all-folds \
-  --mode asahi \
+  --mode asahi_rect \
   --epochs 100 \
   --device 0
+```
+
+Smoke test curto em CPU antes do treinamento completo:
+
+```bash
+PYTHONPATH=src python -m train.train \
+  --data output/asahi_rect/fold_1.yaml \
+  --mode asahi_rect --epochs 1 --batch 2 --workers 0 \
+  --fraction 0.01 --no-val --device cpu
 ```
 
 A saída segue este contrato:
@@ -263,6 +281,14 @@ imagem e distribui as posições uniformemente até as bordas. No dataset de tre
 esses tiles são redimensionados para o `tile_size` configurado antes de serem
 gravados. Na inferência YOLO, o tile adaptativo é entregue ao Ultralytics com
 `imgsz=640`, que realiza o resize e devolve caixas no espaço do tile recebido.
+
+O modo experimental `asahi_rect` preserva a quantidade de colunas sugerida pelo
+ASAHI, calcula a quantidade de linhas pela proporção da imagem e resolve largura
+e altura do tile independentemente para manter o overlap em ambos os eixos. Para
+4032×2268 e overlap de 15%, ele gera uma grade 4×2 de tiles 1136×1226: 8 tiles e
+aproximadamente 21,8% de redundância, contra 12 tiles e 69,6% no ASAHI quadrado.
+No treino, cada tile retangular recebe letterbox para 640×640 e as anotações são
+transformadas com o mesmo scale e padding, sem distorcer a imagem.
 
 ## Avaliação cross-fold
 

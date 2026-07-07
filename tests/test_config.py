@@ -6,7 +6,7 @@ All assertions here are preconditions — if any fails, geraResultados.py will b
 import pytest
 import yaml
 
-_VALID_MODES = ("sahi", "asahi")
+_VALID_MODES = ("sahi", "asahi", "asahi_rect")
 _VALID_SUPPRESSIONS = ("nms", "bws", "nms_ioa", "wbf", "cluster_diou_nms")
 _REQUIRED_PROCESS_KEYS = ("dataset", "slicing", "crossfolds", "inference")
 
