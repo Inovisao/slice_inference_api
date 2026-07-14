@@ -138,14 +138,6 @@ Somente o treino é materializado com tiles. Validação e teste preservam a
 resolução original e o framework de treinamento aplica seu próprio letterbox.
 Executar novamente um fold substitui a saída física daquele fold.
 
-### Endpoints de dataset que não substituem `main.py`
-
-- `POST /dataset/crossfolds` gera apenas divisões em JSON COCO.
-- `POST /slicing/dataset/crossFolds` gera apenas recortes exploratórios, sem labels.
-
-Ambos estão marcados como obsoletos no Swagger. Eles não produzem um dataset YOLO
-treinável.
-
 ## 4. Treinar
 
 Treinar um fold com o modelo inicial incluído no repositório:
@@ -290,9 +282,7 @@ aproximadamente 21,8% de redundância, contra 12 tiles e 69,6% no ASAHI quadrado
 No treino, cada tile retangular recebe letterbox para 640×640 e as anotações são
 transformadas com o mesmo scale e padding, sem distorcer a imagem.
 
-## Avaliação cross-fold
-
-Depois que todos os manifests e checkpoints existirem:
+## Avaliação cross-fold 
 
 ```bash
 python geraResultados.py

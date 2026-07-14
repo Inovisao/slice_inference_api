@@ -8,7 +8,7 @@ processes:
   - index: 1
     dataset:
       input_path: ./dataset
-      output_path: ./output/sahi
+      output_path: ./dataset/sahi
 
     slicing:
       mode: sahi
@@ -18,9 +18,10 @@ processes:
     crossfolds:
       n_folds: 5
       seed: 42
-      val_ratio: 0.15
       ioa_threshold: 0.4
+      val_ratio: 0.15
       empty_tile_ratio: 0.08
+
 
     inference:
       suppression: nms
@@ -31,7 +32,7 @@ processes:
   - index: 2
     dataset:
       input_path: ./dataset
-      output_path: ./output/asahi
+      output_path: ./dataset/asahi
 
     slicing:
       mode: asahi
@@ -54,7 +55,7 @@ processes:
   - index: 3
     dataset:
       input_path: ./dataset
-      output_path: ./output/asahi_rect
+      output_path: ./dataset/asahi_rect
 
     slicing:
       mode: asahi_rect

@@ -1,21 +1,13 @@
 import os
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
 
-from dataset.crossfold import CrossFoldSplitter
 from dataset.preprocessor import DatasetPreprocessor
 from dataset.validator import DatasetValidator
 
 from ..helpers import DATASET_PATH
 
 router = APIRouter(prefix="/dataset", tags=["dataset"])
-
-
-class CrossFoldRequest(BaseModel):
-    n_folds: int = Field(default=5, ge=2)
-    val_ratio: float = Field(default=0.3, gt=0.0, lt=1.0)
-    seed: int = 42
 
 
 @router.get("/validate")
@@ -38,30 +30,3 @@ async def clean_dataset_annotations():
         )
 
     return DatasetPreprocessor(DATASET_PATH).run()
-
-
-@router.post(
-    "/crossfolds",
-    deprecated=True,
-    description=(
-        "Creates COCO split JSON files only. It does not create a trainable "
-        "tiled YOLO dataset; use `python main.py` for that."
-    ),
-)
-async def generate_crossfolds(request: CrossFoldRequest = CrossFoldRequest()):
-    splitter = CrossFoldSplitter(DATASET_PATH)
-
-    if not os.path.isfile(splitter.coco_path):
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "No annotation file found. Run /dataset/clean first.",
-                "expected": splitter.coco_path,
-            },
-        )
-
-    return CrossFoldSplitter(DATASET_PATH).split(
-        n_folds=request.n_folds,
-        val_ratio=request.val_ratio,
-        seed=request.seed,
-    )
