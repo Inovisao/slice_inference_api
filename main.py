@@ -59,7 +59,9 @@ def _estimate_process_gb(
     tile_w: int,
     tile_h: int,
     n_folds: int,
+    split_strategy: str,
     val_ratio: float,
+    test_ratio: float | None,
     source_images_bytes: int,
     geoms: List[Tuple[Tuple[int, int], int, GeometryParams]],
 ) -> float:
@@ -68,8 +70,13 @@ def _estimate_process_gb(
     sample per training appearance and original holdout copies.
     """
     bytes_per_tile = _estimate_bytes_per_tile(tile_w, tile_h)
-    train_repetitions = (n_folds - 1) * (1 - val_ratio)
-    holdout_repetitions = 1 + (n_folds - 1) * val_ratio
+    if split_strategy == "fixed_ratios":
+        effective_test_ratio = test_ratio if test_ratio is not None else 1 / n_folds
+        train_repetitions = n_folds * (1 - val_ratio - effective_test_ratio)
+        holdout_repetitions = n_folds * (val_ratio + effective_test_ratio)
+    else:
+        train_repetitions = (n_folds - 1) * (1 - val_ratio)
+        holdout_repetitions = 1 + (n_folds - 1) * val_ratio
     train_bytes = sum(
         count * (g.tiles_per_image + 1) * train_repetitions * bytes_per_tile
         for (_, _), count, g in geoms
@@ -123,9 +130,19 @@ def _print_process_preview(proc: ProcessConfig) -> float:
     print(f"    tile_size     {s.tile_size[0]}×{s.tile_size[1]} px")
     print(f"    overlap       {s.overlap_ratio * 100:.0f}%")
 
-    print(f"\n  K-Fold")
+    print(f"\n  Folds")
     print(f"    n_folds       {cf.n_folds}")
     print(f"    seed          {cf.seed}")
+    print(f"    strategy      {cf.split_strategy}")
+    if cf.split_strategy == "fixed_ratios":
+        print(f"    split         train {100 * (1 - cf.val_ratio - (cf.test_ratio or 0)):.0f}% | "
+              f"val {100 * cf.val_ratio:.0f}% | test {100 * (cf.test_ratio or 0):.0f}%")
+    else:
+        effective_test = 1 / cf.n_folds
+        effective_val = (1 - effective_test) * cf.val_ratio
+        effective_train = 1 - effective_test - effective_val
+        print(f"    split         train ~{100 * effective_train:.0f}% | "
+              f"val ~{100 * effective_val:.0f}% | test ~{100 * effective_test:.0f}%")
     print(f"    ioa_threshold {cf.ioa_threshold}")
 
     print(f"\n  Inferência")
@@ -170,7 +187,9 @@ def _print_process_preview(proc: ProcessConfig) -> float:
         s.tile_size[0],
         s.tile_size[1],
         cf.n_folds,
+        cf.split_strategy,
         cf.val_ratio,
+        cf.test_ratio,
         _source_images_bytes(coco_path, d.input_path),
         geoms,
     )
@@ -234,7 +253,9 @@ def _run_process(proc: ProcessConfig):
         seed=cf.seed,
         ioa_threshold=cf.ioa_threshold,
         empty_tile_ratio=cf.empty_tile_ratio,
+        split_strategy=cf.split_strategy,
         val_ratio=cf.val_ratio,
+        test_ratio=cf.test_ratio,
     )
     validator.run()
     print(f"\n  Processo {proc.index} concluído.")
@@ -245,7 +266,7 @@ def _run_process(proc: ProcessConfig):
 # ------------------------------------------------------------------ #
 
 def _parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Prepare sliced K-fold datasets.")
+    parser = argparse.ArgumentParser(description="Prepare sliced cross-fold datasets.")
     parser.add_argument(
         "--process",
         type=int,

@@ -49,12 +49,18 @@ def test_generator_writes_trainable_deterministic_folds(tmp_path):
 
     assert len(folds) == 2
     for fold in (1, 2):
-        data = yaml.safe_load((output / f"fold_{fold}.yaml").read_text())
+        data = yaml.safe_load(
+            (output / "filesJSON_infos" / f"fold_{fold}.yaml").read_text()
+        )
         assert data["names"] == {0: "insect"}
         assert list((output / f"fold_{fold}/train/images").glob("*.jpg"))
         assert list((output / f"fold_{fold}/train/labels").glob("*.txt"))
         assert list((output / f"fold_{fold}/test/images").glob("*.jpg"))
         assert not list((output / f"fold_{fold}/train").glob(".empty_tiles_*"))
+        assert (output / "filesJSON" / f"fold_{fold}_train.json").is_file()
+        assert (output / "filesJSON" / f"fold_{fold}_val.json").is_file()
+        assert (output / "filesJSON" / f"fold_{fold}_test.json").is_file()
+        assert (output / "filesJSON_infos" / f"fold_{fold}_stats.json").is_file()
 
 
 def test_modes_use_the_same_source_image_splits(tmp_path):

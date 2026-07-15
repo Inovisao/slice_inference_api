@@ -70,6 +70,27 @@ class TestCrossFoldsConfig:
             val_ratio = cf.get("val_ratio")
             assert val_ratio is not None and 0.0 < val_ratio < 1.0
 
+    def test_split_strategy_is_valid(self, processes):
+        for p in processes:
+            cf = p["crossfolds"]
+            assert cf.get("split_strategy") in {"kfold_holdout", "fixed_ratios"}
+
+    def test_fixed_ratio_strategy_has_valid_test_ratio(self, processes):
+        for p in processes:
+            cf = p["crossfolds"]
+            if cf.get("split_strategy") != "fixed_ratios":
+                continue
+            test_ratio = cf.get("test_ratio")
+            assert test_ratio is not None and 0.0 < test_ratio < 1.0
+            assert cf["val_ratio"] + test_ratio < 1.0
+
+    def test_current_config_documents_trained_split_protocol(self, processes):
+        for p in processes:
+            cf = p["crossfolds"]
+            assert cf["split_strategy"] == "kfold_holdout"
+            assert cf["n_folds"] == 5
+            assert cf["val_ratio"] == 0.15
+
 
 class TestInferenceConfig:
     def test_suppression_is_valid(self, processes):

@@ -33,8 +33,12 @@ class CrossFoldsConfig:
     n_folds: int = 5
     seed: int = 42
     ioa_threshold: float = 0.20
-    # Fraction carved from the non-test pool in each K-fold iteration.
+    # kfold_holdout reproduces the current experiments: test=1/n_folds and
+    # val_ratio is carved from the remaining pool. fixed_ratios uses global
+    # val_ratio/test_ratio fractions per fold.
+    split_strategy: str = "kfold_holdout"
     val_ratio: float = 0.15
+    test_ratio: float | None = None
     empty_tile_ratio: float = 0.08
 
 

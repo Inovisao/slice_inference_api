@@ -23,7 +23,12 @@ def discover_folds(config_path: Path, mode: str) -> list[Path]:
     if not matching:
         raise ValueError(f"No process configured for slicing mode '{mode}'.")
     output = Path(matching[0].dataset.output_path)
-    folds = sorted(output.glob("fold_*.yaml"), key=lambda p: _fold_number(p) or 0)
+    folds = sorted(
+        (output / "filesJSON_infos").glob("fold_*.yaml"),
+        key=lambda p: _fold_number(p) or 0,
+    )
+    if not folds:
+        folds = sorted(output.glob("fold_*.yaml"), key=lambda p: _fold_number(p) or 0)
     if not folds:
         raise FileNotFoundError(
             f"No fold YAML found in {output}. Run 'python main.py' first."

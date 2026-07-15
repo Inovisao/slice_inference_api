@@ -22,6 +22,8 @@ from slicing.service import make_slicer
 _COCO_FILENAME = "_annotations.coco.json"
 _CLEAN_FILENAME = "_annotations_clean.coco.json"
 _DEFAULT_IOA_THRESHOLD = 0.20
+_SPLIT_JSON_DIR = "filesJSON"
+_INFO_DIR = "filesJSON_infos"
 
 # (tile_img, stem, yolo_lines)
 _AnnotatedTile = Tuple[np.ndarray, str, List[str]]
@@ -172,7 +174,7 @@ def compute_geometry(slicer, img_w: int, img_h: int) -> "GeometryParams":
 
 class AsahiKFoldValidator:
     """
-    Generates YOLO-ready k-fold datasets from high-resolution images using SAHI or
+    Generates YOLO-ready fold datasets from high-resolution images using SAHI or
     ASAHI tiling. Each fold materialises tiles on disk, writes a fold_{i}.yaml,
     and can be cleaned up after training to prevent cross-contamination.
 
@@ -205,7 +207,9 @@ class AsahiKFoldValidator:
         seed: int = 42,
         ioa_threshold: float = _DEFAULT_IOA_THRESHOLD,
         empty_tile_ratio: float = 0.08,
+        split_strategy: str = "kfold_holdout",
         val_ratio: float = 0.15,
+        test_ratio: float | None = None,
         groups: Optional[Dict[str, str]] = None,
     ):
         self.dataset_path = dataset_path
@@ -215,7 +219,9 @@ class AsahiKFoldValidator:
         self.seed = seed
         self.ioa_threshold = ioa_threshold
         self.empty_tile_ratio = empty_tile_ratio
+        self.split_strategy = split_strategy
         self.val_ratio = val_ratio
+        self.test_ratio = test_ratio
         self.groups = groups
 
         self._target_size: Tuple[int, int] = slicing_config.tile_size  # (640, 640)
@@ -285,12 +291,20 @@ class AsahiKFoldValidator:
         """Returns list of (train, val, test) triplets for each fold."""
         n = len(images)
 
+        if self.split_strategy == "kfold_holdout":
+            return self._make_kfold_holdout_splits(images)
+        if self.split_strategy == "fixed_ratios":
+            return self._make_fixed_ratio_splits(images)
+        raise ValueError(f"Unknown split_strategy: {self.split_strategy}")
+
+    def _make_kfold_holdout_splits(
+        self, images: List[dict]
+    ) -> List[Tuple[List[dict], List[dict], List[dict]]]:
         if self.groups is not None:
             raw = self._group_kfold(images)
         else:
-            raw = self._kfold(n)
+            raw = self._kfold(len(images))
 
-        # raw yields (train_idx, test_idx); carve val from the non-test pool
         splits = []
         for train_idx, test_idx in raw:
             pool = [images[i] for i in train_idx]
@@ -299,8 +313,58 @@ class AsahiKFoldValidator:
             val_imgs = pool[:n_val]
             train_imgs = pool[n_val:]
             splits.append((train_imgs, val_imgs, test_imgs))
+        return splits
+
+    def _make_fixed_ratio_splits(
+        self, images: List[dict]
+    ) -> List[Tuple[List[dict], List[dict], List[dict]]]:
+        n = len(images)
+        if self.test_ratio is None:
+            raise ValueError("test_ratio is required when split_strategy=fixed_ratios")
+
+        splits = []
+        n_test = max(1, round(n * self.test_ratio))
+        n_val = max(1, round(n * self.val_ratio))
+        if n_test + n_val >= n:
+            raise ValueError(
+                "Dataset too small for configured split ratios: "
+                f"n={n}, val={n_val}, test={n_test}"
+            )
+
+        for fold_idx in range(self.n_splits):
+            if self.groups is not None:
+                ordered_indices = self._grouped_permutation(images, fold_idx)
+            else:
+                ordered_indices = self._permutation(n, fold_idx)
+
+            test_idx = set(ordered_indices[:n_test])
+            val_idx = set(ordered_indices[n_test : n_test + n_val])
+            train_imgs = [
+                images[i] for i in ordered_indices[n_test + n_val :]
+            ]
+            val_imgs = [images[i] for i in ordered_indices if i in val_idx]
+            test_imgs = [images[i] for i in ordered_indices if i in test_idx]
+            splits.append((train_imgs, val_imgs, test_imgs))
 
         return splits
+
+    def _permutation(self, n: int, fold_idx: int) -> np.ndarray:
+        indices = np.arange(n)
+        np.random.default_rng(self.seed + fold_idx).shuffle(indices)
+        return indices
+
+    def _grouped_permutation(self, images: List[dict], fold_idx: int) -> np.ndarray:
+        group_labels = [self.groups.get(img["file_name"], img["file_name"]) for img in images]
+        unique_groups = list(dict.fromkeys(group_labels))
+        rng = np.random.default_rng(self.seed + fold_idx)
+        rng.shuffle(unique_groups)
+
+        ordered: List[int] = []
+        for group in unique_groups:
+            ordered.extend(
+                idx for idx, label in enumerate(group_labels) if label == group
+            )
+        return np.array(ordered)
 
     def _kfold(self, n: int) -> List[Tuple[np.ndarray, np.ndarray]]:
         indices = np.arange(n)
@@ -683,9 +747,84 @@ class AsahiKFoldValidator:
             "nc": len(names),
             "names": names,
         }
-        yaml_path = os.path.join(self.output_root, f"fold_{fold_index}.yaml")
+        info_dir = os.path.join(self.output_root, _INFO_DIR)
+        os.makedirs(info_dir, exist_ok=True)
+        yaml_path = os.path.join(info_dir, f"fold_{fold_index}.yaml")
         with open(yaml_path, "w") as f:
             yaml.dump(content, f, default_flow_style=False, allow_unicode=True)
+
+    def _write_split_coco_from_yolo(
+        self, fold_index: int, split_name: str, split_dir: str
+    ) -> None:
+        """Writes a COCO copy of a generated YOLO split for external consumers."""
+        images_dir = os.path.join(split_dir, "images")
+        labels_dir = os.path.join(split_dir, "labels")
+        if not os.path.isdir(images_dir):
+            return
+
+        json_dir = os.path.join(self.output_root, _SPLIT_JSON_DIR)
+        os.makedirs(json_dir, exist_ok=True)
+
+        categories = sorted(self._coco["categories"], key=lambda c: c["id"])
+        image_exts = (".jpg", ".jpeg", ".png")
+        images: List[dict] = []
+        annotations: List[dict] = []
+        ann_id = 1
+
+        image_files = sorted(
+            fname for fname in os.listdir(images_dir)
+            if fname.lower().endswith(image_exts)
+        )
+        for image_id, fname in enumerate(image_files, start=1):
+            img_path = os.path.join(images_dir, fname)
+            frame = cv2.imread(img_path)
+            if frame is None:
+                continue
+            height, width = frame.shape[:2]
+            images.append({
+                "id": image_id,
+                "file_name": fname,
+                "width": width,
+                "height": height,
+            })
+
+            label_path = os.path.join(labels_dir, f"{Path(fname).stem}.txt")
+            if not os.path.isfile(label_path):
+                continue
+            with open(label_path) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) < 5:
+                        continue
+                    cls, cx, cy, bw, bh = parts[:5]
+                    cls_idx = int(float(cls))
+                    cx, cy, bw, bh = map(float, (cx, cy, bw, bh))
+                    box_w = bw * width
+                    box_h = bh * height
+                    x = (cx * width) - box_w / 2
+                    y = (cy * height) - box_h / 2
+                    category = categories[cls_idx] if cls_idx < len(categories) else None
+                    category_id = category["id"] if category else cls_idx
+                    annotations.append({
+                        "id": ann_id,
+                        "image_id": image_id,
+                        "category_id": category_id,
+                        "bbox": [x, y, box_w, box_h],
+                        "area": box_w * box_h,
+                        "iscrowd": 0,
+                    })
+                    ann_id += 1
+
+        split_coco = {
+            "info": self._coco.get("info", {}),
+            "licenses": self._coco.get("licenses", []),
+            "categories": categories,
+            "images": images,
+            "annotations": annotations,
+        }
+        out_path = os.path.join(json_dir, f"fold_{fold_index}_{split_name}.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(split_coco, f, indent=2, ensure_ascii=False)
 
     # ------------------------------------------------------------------ #
     # Report writers                                                       #
@@ -793,14 +932,21 @@ class AsahiKFoldValidator:
     # ------------------------------------------------------------------ #
 
     def _stats_path(self, fold_index: int) -> str:
-        return os.path.join(self.output_root, f"fold_{fold_index}_stats.json")
+        return os.path.join(
+            self.output_root, _INFO_DIR, f"fold_{fold_index}_stats.json"
+        )
 
     def _save_fold_stats(self, stats: FoldStats):
-        with open(self._stats_path(stats.fold), "w", encoding="utf-8") as f:
+        path = self._stats_path(stats.fold)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(stats.to_full_dict(), f, ensure_ascii=False)
 
     def _load_fold_stats(self, fold_index: int) -> Optional[FoldStats]:
         path = self._stats_path(fold_index)
+        if not os.path.isfile(path):
+            legacy = os.path.join(self.output_root, f"fold_{fold_index}_stats.json")
+            path = legacy if os.path.isfile(legacy) else path
         if not os.path.isfile(path):
             return None
         with open(path, encoding="utf-8") as f:
@@ -830,6 +976,9 @@ class AsahiKFoldValidator:
         test_metrics = self._write_holdout_split(
             test_images or [], test_dir, f"fold {fold_index} test "
         )
+        self._write_split_coco_from_yolo(fold_index, "train", train_dir)
+        self._write_split_coco_from_yolo(fold_index, "val", val_dir)
+        self._write_split_coco_from_yolo(fold_index, "test", test_dir)
         self._write_yaml(fold_index, train_dir, val_dir, test_dir)
 
         stats = FoldStats(

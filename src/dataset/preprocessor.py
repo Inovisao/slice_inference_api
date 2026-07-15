@@ -54,7 +54,7 @@ class PreprocessReport:
 
 class DatasetPreprocessor:
     """
-    Validates and normalises a COCO dataset before k-fold slicing.
+    Validates and normalises a COCO dataset before fold generation.
 
     Normalisations applied (in order):
       1. Fill missing width/height on image entries by reading from disk.

@@ -63,7 +63,9 @@ def test_generated_test_split_is_consistent(mode, fold, output_root, models_root
     assert images, f"No test images in {images_dir}"
     assert images == labels
 
-    stats_path = os.path.join(output_root, f"fold_{fold}_stats.json")
+    stats_path = os.path.join(
+        output_root, "filesJSON_infos", f"fold_{fold}_stats.json"
+    )
     assert os.path.isfile(stats_path)
     with open(stats_path, encoding="utf-8") as f:
         stats_names = {item["image_name"] for item in json.load(f)["test_metrics"]}

@@ -91,7 +91,9 @@ class ConfigLoader:
             n_folds=cf.get("n_folds", 5),
             seed=cf.get("seed", 42),
             ioa_threshold=cf.get("ioa_threshold", 0.2),
+            split_strategy=cf.get("split_strategy", "kfold_holdout"),
             val_ratio=cf.get("val_ratio", 0.15),
+            test_ratio=cf.get("test_ratio"),
             empty_tile_ratio=cf.get("empty_tile_ratio", 0.08),
         )
 
@@ -148,6 +150,22 @@ class ConfigLoader:
                 f"[process {idx}] crossfolds.val_ratio must be in (0, 1), "
                 f"got {cf.val_ratio}"
             )
+        if cf.split_strategy not in {"kfold_holdout", "fixed_ratios"}:
+            raise ValueError(
+                f"[process {idx}] crossfolds.split_strategy must be "
+                f"'kfold_holdout' or 'fixed_ratios', got {cf.split_strategy}"
+            )
+        if cf.split_strategy == "fixed_ratios":
+            if cf.test_ratio is None or not (0.0 < cf.test_ratio < 1.0):
+                raise ValueError(
+                    f"[process {idx}] crossfolds.test_ratio must be in (0, 1) "
+                    f"when split_strategy=fixed_ratios, got {cf.test_ratio}"
+                )
+            if cf.val_ratio + cf.test_ratio >= 1.0:
+                raise ValueError(
+                    f"[process {idx}] crossfolds.val_ratio + test_ratio must be < 1, "
+                    f"got {cf.val_ratio + cf.test_ratio}"
+                )
         if not (0.0 < cf.ioa_threshold <= 1.0):
             raise ValueError(
                 f"[process {idx}] crossfolds.ioa_threshold must be in (0, 1], "

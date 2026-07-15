@@ -1,5 +1,5 @@
 """
-Retoma a geração do k-fold ASAHI a partir do fold 3.
+Retoma a geração dos folds ASAHI a partir do fold 3.
 Uso: python scripts/resume_asahi.py [resume_from]
 """
 
@@ -20,12 +20,14 @@ slicing_cfg = SlicingConfig(
     overlap_ratio=0.15,
 )
 validator = AsahiKFoldValidator(
-    dataset_path=os.path.join(ROOT, "dataset"),
+    dataset_path=os.path.join(ROOT, "dataset", "all"),
     slicing_config=slicing_cfg,
     n_splits=5,
-    output_root=os.path.join(ROOT, "output", "asahi"),
+    output_root=os.path.join(ROOT, "dataset", "asahi"),
     seed=42,
     ioa_threshold=0.2,
+    val_ratio=0.10,
+    test_ratio=0.10,
 )
 validator.run(resume_from=resume_from)
 print("Concluído.")

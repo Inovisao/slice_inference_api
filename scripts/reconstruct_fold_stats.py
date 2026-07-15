@@ -64,12 +64,12 @@ def reconstruct_split(images_dir: str, labels_dir: str, coco_images: dict) -> li
 
 
 def main():
-    output_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "output", "asahi")
+    output_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "dataset", "asahi")
     coco_path  = sys.argv[2] if len(sys.argv) > 2 else None
 
     # locate COCO JSON
     if coco_path is None:
-        dataset_dir = os.path.join(ROOT, "dataset")
+        dataset_dir = os.path.join(ROOT, "dataset", "all")
         for fname in ("_annotations_clean.coco.json", "_annotations.coco.json"):
             candidate = os.path.join(dataset_dir, fname)
             if os.path.isfile(candidate):
@@ -99,7 +99,9 @@ def main():
     fold_index = 1
     while True:
         fold_dir = os.path.join(output_dir, f"fold_{fold_index}")
-        stats_path = os.path.join(output_dir, f"fold_{fold_index}_stats.json")
+        info_dir = os.path.join(output_dir, "filesJSON_infos")
+        os.makedirs(info_dir, exist_ok=True)
+        stats_path = os.path.join(info_dir, f"fold_{fold_index}_stats.json")
 
         if not os.path.isdir(fold_dir):
             break
