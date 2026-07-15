@@ -8,3 +8,4 @@ results/*
 pesos
 results_01
 models/*
+train_model/compara_detectores_torch
