@@ -123,17 +123,18 @@ def _append_csv(path: str, fieldnames: list, rows: list) -> None:
 
 
 def run_fold(process, arch: str, fold: int, paths, results_csv, counting_csv) -> None:
-    mode = process.slicing.slicing_mode
+    slicing_mode = process.slicing.slicing_mode
+    dataset_name = os.path.basename(process.dataset.output_path.rstrip("/"))
     overlap = process.slicing.overlap_ratio
     suppression = process.inference.suppression
     conf_thr = process.inference.conf_threshold
     iou_thr = process.inference.iou_threshold
     batch_size = process.inference.batch_size
-    label       = model_label(mode, arch)
+    label       = model_label(dataset_name, arch)
 
-    weights = resolve_checkpoint(paths.models, mode, fold, arch)
+    weights = resolve_checkpoint(paths.models, dataset_name, fold, arch)
     test_dir = os.path.join(process.dataset.output_path, f"fold_{fold}", "test")
-    vis_dir = os.path.join(paths.results, mode, arch, f"fold_{fold}")
+    vis_dir = os.path.join(paths.results, dataset_name, arch, f"fold_{fold}")
 
     if not os.path.isdir(os.path.join(test_dir, "images")):
         tqdm.write(f"  [SKIP] test dir not found: {test_dir}")
@@ -141,7 +142,7 @@ def run_fold(process, arch: str, fold: int, paths, results_csv, counting_csv) ->
 
     tqdm.write(f"  Loading {arch}: {weights}")
     engine     = make_engine(arch, weights, device="cuda")
-    slicer     = make_slicer(mode, overlap)
+    slicer     = make_slicer(slicing_mode, overlap)
     loader     = FoldTestLoader(test_dir)
     matcher    = DetectionMatcher(iou_threshold=0.5)
     calculator = MetricsCalculator()
@@ -220,10 +221,10 @@ def main():
     _init_csv(counting_csv, _COUNTING_FIELDS)
 
     for process in processes:
-        mode = process.slicing.slicing_mode
+        dataset_name = os.path.basename(process.dataset.output_path.rstrip("/"))
         n_folds = process.crossfolds.n_folds
         tqdm.write(f"\n{'='*60}")
-        tqdm.write(f"Process: {mode.upper()}  |  suppression: {process.inference.suppression}")
+        tqdm.write(f"Process: {dataset_name.upper()}  |  suppression: {process.inference.suppression}")
         tqdm.write(f"{'='*60}")
 
         for fold in tqdm(range(1, n_folds + 1), desc="  folds", unit="fold", ncols=80, leave=True):
@@ -234,7 +235,7 @@ def main():
                         process, arch, fold, paths, results_csv, counting_csv
                     )
                 except Exception as exc:
-                    tqdm.write(f"  [ERROR] {mode.upper()} fold_{fold} {arch}: {exc}")
+                    tqdm.write(f"  [ERROR] {dataset_name.upper()} fold_{fold} {arch}: {exc}")
 
     tqdm.write(f"\nSalvo: {results_csv}")
     tqdm.write(f"Salvo: {counting_csv}")

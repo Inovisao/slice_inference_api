@@ -19,6 +19,7 @@ dataset/sahi|asahi|asahi_rect
 treinamento por fold                         train_model/compara_detectores_torch/src/main.py
     │
     ▼
+pesos/<modo>/model_checkpoints/fold_N/<Modelo>/...
 models/<modo>/fold_N/<arquitetura>/manifest.json
     │
     ▼
@@ -179,7 +180,7 @@ Execute a partir da raiz deste repositório:
 
 ```bash
 DATASET_ROOT=dataset/asahi_rect \
-MODEL_CHECKPOINTS_ROOT=models/asahi_rect \
+MODEL_CHECKPOINTS_ROOT=pesos/asahi_rect/model_checkpoints \
 EVAL_MODELS_ROOT=models \
 MODELS_TO_RUN=YOLOV8,Faster,Detr \
 python train_model/compara_detectores_torch/src/main.py
@@ -188,8 +189,8 @@ python train_model/compara_detectores_torch/src/main.py
 Significado:
 
 - `DATASET_ROOT`: dataset recortado a treinar, por exemplo `dataset/sahi`, `dataset/asahi` ou `dataset/asahi_rect`. Obrigatório.
-- `MODEL_CHECKPOINTS_ROOT`: pasta de checkpoints da execução de treino.
-- `EVAL_MODELS_ROOT`: raiz onde serão gravados manifestos compatíveis com `geraResultados.py`.
+- `MODEL_CHECKPOINTS_ROOT`: pasta dos pesos/checkpoints da execução de treino. Use `pesos/<modo>/model_checkpoints`.
+- `EVAL_MODELS_ROOT`: raiz onde serão gravados apenas os manifestos compatíveis com `geraResultados.py`.
 - `MODELS_TO_RUN`: modelos a treinar, separados por vírgula.
 - `TILING_MODE`: modo de avaliação; para estes datasets use `basic` ou omita.
 
@@ -232,7 +233,7 @@ Antes de rodar todos os folds/modelos, rode um único modelo:
 
 ```bash
 DATASET_ROOT=dataset/asahi_rect \
-MODEL_CHECKPOINTS_ROOT=models/asahi_rect \
+MODEL_CHECKPOINTS_ROOT=pesos/asahi_rect/model_checkpoints \
 EVAL_MODELS_ROOT=models \
 MODELS_TO_RUN=YOLOV8 \
 python train_model/compara_detectores_torch/src/main.py
@@ -241,6 +242,7 @@ python train_model/compara_detectores_torch/src/main.py
 O treinamento deve gerar pelo menos:
 
 ```text
+pesos/asahi_rect/model_checkpoints/fold_1/YOLOV8/train/weights/best.pt
 models/asahi_rect/fold_1/yolo/manifest.json
 ```
 
@@ -301,7 +303,7 @@ Exemplo:
 curl -X POST http://localhost:8000/inference/single_image \
   -H "Content-Type: application/json" \
   -d '{
-    "model_path": "./models/sahi/fold_1/yolo/train/weights/best.pt",
+    "model_path": "./pesos/sahi/model_checkpoints/fold_1/YOLOV8/train/weights/best.pt",
     "image_name": "imagem_01.jpg",
     "slicing_mode": "sahi",
     "overlap_ratio": 0.1,
@@ -340,7 +342,8 @@ curl -X POST http://localhost:8000/inference/single_image \
 │   ├── sahi/
 │   ├── asahi/
 │   └── asahi_rect/
-├── models/                         # manifestos/checkpoints consumidos pela avaliação
+├── pesos/                          # checkpoints pesados dos treinamentos
+├── models/                         # somente manifestos consumidos pela avaliação
 └── results/                        # CSVs e visualizações
 ```
 
@@ -372,6 +375,9 @@ dataset/<modo>/fold_N/split/labels
 Checkpoint para avaliação:
 
 ```text
+pesos/<modo>/model_checkpoints/fold_N/YOLOV8/train/weights/best.pt
+pesos/<modo>/model_checkpoints/fold_N/Faster/best.pth
+pesos/<modo>/model_checkpoints/fold_N/Detr/training/best_model.pth
 models/<modo>/fold_N/yolo/manifest.json
 models/<modo>/fold_N/faster_rcnn/manifest.json
 models/<modo>/fold_N/detr/manifest.json

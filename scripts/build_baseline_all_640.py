@@ -89,6 +89,20 @@ def _index_source(coco: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict
     return images_by_name, names_by_stem, annotations_by_image
 
 
+def _drop_unused_categories(coco: dict[str, Any]) -> None:
+    present_ids = {
+        int(annotation["category_id"])
+        for annotation in coco.get("annotations", [])
+    }
+    if not present_ids:
+        return
+    coco["categories"] = [
+        category
+        for category in coco.get("categories", [])
+        if int(category["id"]) in present_ids
+    ]
+
+
 def _fold_original_names(
     fold_source: Path,
     fold: str,
@@ -375,6 +389,7 @@ def build_baseline(args: argparse.Namespace) -> None:
 
     annotation_path = _source_annotation_path(source)
     source_coco = _load_json(annotation_path)
+    _drop_unused_categories(source_coco)
     images_by_name, names_by_stem, annotations_by_image = _index_source(source_coco)
     folds = _discover_folds(fold_source)
     split_plan = _collect_split_plan(fold_source, folds, names_by_stem)

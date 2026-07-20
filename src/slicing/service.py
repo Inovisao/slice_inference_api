@@ -9,6 +9,7 @@ from config.settings import SlicingConfig
 from slicing.sahi import Sahi
 from slicing.asahi import Asahi
 from slicing.asahi_rect import AsahiRect
+from slicing.none import NoSlice
 
 
 def make_slicer(slicing_mode: str, overlap_ratio: float):
@@ -21,6 +22,8 @@ def make_slicer(slicing_mode: str, overlap_ratio: float):
         return Asahi(slicing_config)
     if slicing_mode == "asahi_rect":
         return AsahiRect(slicing_config)
+    if slicing_mode == "none":
+        return NoSlice(slicing_config)
     return Sahi(slicing_config)
 
 

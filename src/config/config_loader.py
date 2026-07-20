@@ -12,7 +12,7 @@ from config.settings import (
     SlicingConfig,
 )
 
-_VALID_SLICING_MODES = ("sahi", "asahi", "asahi_rect")
+_VALID_SLICING_MODES = ("sahi", "asahi", "asahi_rect", "none")
 _VALID_SUPPRESSIONS = ("nms", "bws", "nms_ioa", "wbf", "cluster_diou_nms")
 
 
@@ -134,7 +134,7 @@ class ConfigLoader:
                 f"[process {idx}] slicing.tile_size must be [w, h] with positive values, "
                 f"got {s.tile_size}"
             )
-        if not (0.0 < s.overlap_ratio < 1.0):
+        if s.slicing_mode != "none" and not (0.0 < s.overlap_ratio < 1.0):
             raise ValueError(
                 f"[process {idx}] slicing.overlap_ratio must be in (0, 1), "
                 f"got {s.overlap_ratio}"

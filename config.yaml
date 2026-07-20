@@ -77,3 +77,27 @@ processes:
       conf_threshold: 0.5
       iou_threshold: 0.5
       batch_size: 32
+
+  - index: 4
+    dataset:
+      input_path: ./dataset/all
+      output_path: ./dataset/all_640
+
+    slicing:
+      mode: none
+      tile_size: [640, 640]
+      overlap_ratio: 0.0
+
+    crossfolds:
+      n_folds: 5
+      seed: 42
+      ioa_threshold: 0.4
+      split_strategy: kfold_holdout
+      val_ratio: 0.15
+      empty_tile_ratio: 0.08
+
+    inference:
+      suppression: nms
+      conf_threshold: 0.5
+      iou_threshold: 0.5
+      batch_size: 32

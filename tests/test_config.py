@@ -6,7 +6,7 @@ All assertions here are preconditions — if any fails, geraResultados.py will b
 import pytest
 import yaml
 
-_VALID_MODES = ("sahi", "asahi", "asahi_rect")
+_VALID_MODES = ("sahi", "asahi", "asahi_rect", "none")
 _VALID_SUPPRESSIONS = ("nms", "bws", "nms_ioa", "wbf", "cluster_diou_nms")
 _REQUIRED_PROCESS_KEYS = ("dataset", "slicing", "crossfolds", "inference")
 
@@ -50,6 +50,9 @@ class TestSlicingConfig:
         for p in processes:
             overlap = p["slicing"].get("overlap_ratio")
             assert overlap is not None, "overlap_ratio is missing"
+            if p["slicing"].get("mode") == "none":
+                assert overlap == 0.0, f"'none' mode has no tiles; overlap_ratio should be 0.0, got {overlap}"
+                continue
             assert 0.0 < overlap < 1.0, f"overlap_ratio must be in (0, 1), got {overlap}"
 
     def test_tile_size_is_positive(self, processes):
