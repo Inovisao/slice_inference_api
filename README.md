@@ -30,6 +30,15 @@ avaliação e visualizações                    python geraResultados.py
 
 Requer Python 3.10 ou mais recente para o pipeline de recorte/API.
 
+O módulo de treinamento `train_model/compara_detectores_torch` é um submódulo git.
+Ao clonar, inclua-o:
+
+```bash
+git clone --recurse-submodules <repo-url>
+# ou, em um clone já existente:
+git submodule update --init --recursive
+```
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
@@ -286,6 +295,28 @@ Rscript geraGraficos.R
 Esse script espera `results/results.csv`, `results/counting.csv` e, se usado,
 resultados de baseline em `results/baseline/results.csv`.
 
+### Dashboard de análise de threshold
+
+Dashboard HTML interativo para escolher o threshold de confiança por modo de recorte
+e detector, com boxplots por fold, curvas P/R/F1, curva Precision-Recall e dispersão de
+contagem — todos reagindo a um slider. As métricas são pré-computadas offline (filtro →
+supressão do framework → matching IoU@0,5), então o slider só faz lookup. Protocolo sem
+vazamento: o threshold é escolhido no `val` e reportado no `test`.
+
+```bash
+# 1. Coleta detecções brutas (pré-supressão, conf>=0.1) — usa GPU
+python scripts/collect_raw_detections.py
+# 2. Pré-computa métricas por threshold (CPU) -> results/threshold_analysis/dashboard_data.json
+python scripts/threshold_precompute.py
+# 3. Sirva a raiz do projeto e abra o dashboard
+python -m http.server 8080
+# http://localhost:8080/dashboards/threshold_dashboard.html
+```
+
+O HTML fica versionado em [dashboards/](dashboards/); os dados gerados vivem em
+`results/threshold_analysis/` (ignorado pelo git, regenerável). Detalhes em
+[dashboards/README.md](dashboards/README.md).
+
 ### API de inferência operacional
 
 A API é separada do treinamento e carrega checkpoints YOLO:
@@ -333,18 +364,21 @@ curl -X POST http://localhost:8000/inference/single_image \
 │   ├── train/                      # treino YOLO simples local
 │   └── config/                     # loader de config.yaml
 ├── api/                            # FastAPI operacional
-├── train_model/compara_detectores_torch/
-│   └── src/Detectors/              # treinamento multi-arquitetura
+├── train_model/compara_detectores_torch/   # submódulo git — treino multi-arquitetura
+│   └── src/Detectors/
+├── scripts/                        # utilitários (coleta, pré-computo, layout de pesos)
+├── dashboards/                     # HTML de visualização versionado (dashboard de threshold)
 ├── geraResultados.py               # avaliação experimental cross-fold
 ├── geraGraficos.R                  # gráficos e ANOVA/Tukey
 ├── dataset/
 │   ├── all/                        # imagens originais e COCO bruto/limpo
 │   ├── sahi/
 │   ├── asahi/
-│   └── asahi_rect/
+│   ├── asahi_rect/
+│   └── all_640/                    # baseline sem tiling (resize direto 640×640)
 ├── pesos/                          # checkpoints pesados dos treinamentos
 ├── models/                         # somente manifestos consumidos pela avaliação
-└── results/                        # CSVs e visualizações
+└── results/                        # CSVs, visualizações e dados de dashboard (gerados)
 ```
 
 ### Responsabilidades dos módulos

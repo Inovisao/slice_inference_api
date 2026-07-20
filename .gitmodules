@@ -1,0 +1,3 @@
+[submodule "train_model/compara_detectores_torch"]
+	path = train_model/compara_detectores_torch
+	url = https://github.com/Inovisao/compara_detectores_torch.git
