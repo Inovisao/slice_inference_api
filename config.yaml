@@ -1,103 +1,37 @@
+# ============================================================================
+#  Indice de setups de avaliacao.
+#
+#  Cada setup e um arquivo em configs/<recorte>.yaml com o bloco de configuracao
+#  (dataset, slicing, crossfolds, inference) e a lista de models a avaliar.
+#
+#  Contrato de saida (fixo): a avaliacao grava por modelo em
+#    results/<recorte>/<modelo>/fold_N/   (visualizacoes)
+#  e o rotulo no CSV e <RECORTE>_<MODELO> (ex. ASAHI_RECT_YOLOV8L). O <recorte>
+#  vem do nome da pasta em dataset.output_path.
+#
+#  Para avaliar outro modelo, edite 'models' no configs/<recorte>.yaml
+#  correspondente (ex. models: [YOLOV8L]) — nao crie um setup novo por modelo.
+#
+#  setups_to_run seleciona QUAIS recortes rodam.
+# ============================================================================
+
 paths:
   source_dataset: ./dataset/all
   generated_datasets: ./output
   models: ./models
   results: ./results
 
-processes:
-  - index: 1
-    dataset:
-      input_path: ./dataset/all
-      output_path: ./dataset/sahi
+# Recortes (campo 'name' abaixo) a executar em geraResultados.py.
+setups_to_run:
+  - asahi_rect
 
-    slicing:
-      mode: sahi
-      tile_size: [640, 640]
-      overlap_ratio: 0.1
-
-    crossfolds:
-      n_folds: 5
-      seed: 42
-      ioa_threshold: 0.4
-      split_strategy: kfold_holdout
-      val_ratio: 0.15
-      empty_tile_ratio: 0.08
-
-
-    inference:
-      suppression: nms
-      conf_threshold: 0.5
-      iou_threshold: 0.5
-      batch_size: 32
-
-  - index: 2
-    dataset:
-      input_path: ./dataset/all
-      output_path: ./dataset/asahi
-
-    slicing:
-      mode: asahi
-      tile_size: [640, 640]
-      overlap_ratio: 0.15
-
-    crossfolds:
-      n_folds: 5
-      seed: 42
-      ioa_threshold: 0.4
-      split_strategy: kfold_holdout
-      val_ratio: 0.15
-      empty_tile_ratio: 0.08
-
-    inference:
-      suppression: cluster_diou_nms
-      conf_threshold: 0.5
-      iou_threshold: 0.5
-      batch_size: 32
-
-  - index: 3
-    dataset:
-      input_path: ./dataset/all
-      output_path: ./dataset/asahi_rect
-
-    slicing:
-      mode: asahi_rect
-      tile_size: [640, 640]
-      overlap_ratio: 0.15
-
-    crossfolds:
-      n_folds: 5
-      seed: 42
-      ioa_threshold: 0.4
-      split_strategy: kfold_holdout
-      val_ratio: 0.15
-      empty_tile_ratio: 0.08
-
-    inference:
-      suppression: cluster_diou_nms
-      conf_threshold: 0.5
-      iou_threshold: 0.5
-      batch_size: 32
-
-  - index: 4
-    dataset:
-      input_path: ./dataset/all
-      output_path: ./dataset/all_640
-
-    slicing:
-      mode: none
-      tile_size: [640, 640]
-      overlap_ratio: 0.0
-
-    crossfolds:
-      n_folds: 5
-      seed: 42
-      ioa_threshold: 0.4
-      split_strategy: kfold_holdout
-      val_ratio: 0.15
-      empty_tile_ratio: 0.08
-
-    inference:
-      suppression: nms
-      conf_threshold: 0.5
-      iou_threshold: 0.5
-      batch_size: 32
+# Catalogo de recortes disponiveis. Adicione novos aqui + um arquivo em configs/.
+setups:
+  - name: sahi
+    config: configs/sahi.yaml
+  - name: asahi
+    config: configs/asahi.yaml
+  - name: asahi_rect
+    config: configs/asahi_rect.yaml
+  - name: all_640
+    config: configs/all_640.yaml

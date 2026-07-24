@@ -35,28 +35,39 @@ from evaluation.loader import FoldTestLoader
 from evaluation.matcher import DetectionMatcher
 from evaluation.metrics import MetricsCalculator
 from evaluation.visualizer import draw_eval_image
-from config.config_loader import ConfigLoader
+from config.config_loader import ConfigLoader, engine_dir_for_model
 from inference.engine import make_engine
 from inference.pipeline import _SUPPRESSION_REGISTRY
 from slicing.service import make_slicer
 
 
-_ARCHS = ["YOLO", "Faster", "Detr"]
-
-_ARCH_DIR = {"YOLO": "yolo", "Faster": "faster_rcnn", "Detr": "detr"}
+# Maps the manifest arch dir (from the model name's engine) to the inference engine key.
+_ENGINE_KEY = {"yolo": "YOLO", "faster_rcnn": "Faster", "detr": "Detr"}
 
 _RESULTS_FIELDS  = ["models", "fold", "mAP50", "mAP75", "mAP", "precision", "recall",
                     "fscore", "MAE", "RMSE", "r", "slicing_time_ms_mean", "slicing_time_ms_total"]
 _COUNTING_FIELDS = ["models", "fold", "image_name", "groundtruth", "predicted"]
 
 
-def model_label(mode: str, arch: str) -> str:
-    return f"{mode.upper()}_{arch}"
+def model_label(output_name: str, model_name: str) -> str:
+    """CSV label: <OUTPUT_NAME>_<MODEL>, e.g. ASAHI_RECT_YOLOV8L."""
+    return f"{output_name.upper()}_{model_name}"
 
 
-def resolve_checkpoint(models_root: str, mode: str, fold: int, arch: str) -> str:
+def engine_key_for_model(model_name: str) -> str:
+    """Inference engine key ('YOLO'|'Faster'|'Detr') inferred from the model name."""
+    return _ENGINE_KEY[engine_dir_for_model(model_name)]
+
+
+def resolve_checkpoint(models_root: str, weights_dataset: str, fold: int, model_name: str) -> str:
+    """Resolve a checkpoint by weights dataset (crop folder) + model name.
+
+    weights_dataset is the crop folder that owns the weights (e.g. 'asahi_rect'),
+    NOT the setup's output_name — several setups may share the same weights.
+    model_name is the weights subfolder (e.g. 'YOLOV8L') under that fold.
+    """
     manifest_path = os.path.join(
-        models_root, mode, f"fold_{fold}", _ARCH_DIR[arch], "manifest.json"
+        models_root, weights_dataset, f"fold_{fold}", model_name, "manifest.json"
     )
     if not os.path.isfile(manifest_path):
         raise FileNotFoundError(f"checkpoint manifest not found: {manifest_path}")
@@ -111,10 +122,16 @@ def save_visualization(image, tile_coords, gt_boxes, pred_boxes, pred_scores, ma
     cv2.imwrite(out_path, vis)
 
 
-def _init_csv(path: str, fieldnames: list) -> None:
+def _ensure_csv_header(path: str, fieldnames: list) -> None:
+    """Create the CSV with a header only if it does not exist yet.
+
+    Never truncates: results accumulate across runs (append-only). If a setup is
+    re-run, its rows are appended again — dedup by removing old rows manually.
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", newline="") as f:
-        csv.DictWriter(f, fieldnames=fieldnames).writeheader()
+    if not os.path.isfile(path):
+        with open(path, "w", newline="") as f:
+            csv.DictWriter(f, fieldnames=fieldnames).writeheader()
 
 
 def _append_csv(path: str, fieldnames: list, rows: list) -> None:
@@ -122,26 +139,28 @@ def _append_csv(path: str, fieldnames: list, rows: list) -> None:
         csv.DictWriter(f, fieldnames=fieldnames).writerows(rows)
 
 
-def run_fold(process, arch: str, fold: int, paths, results_csv, counting_csv) -> None:
+def run_fold(process, model_name: str, fold: int, paths, results_csv, counting_csv) -> None:
     slicing_mode = process.slicing.slicing_mode
-    dataset_name = os.path.basename(process.dataset.output_path.rstrip("/"))
+    output_name = process.output_name
+    weights_dataset = os.path.basename(process.dataset.output_path.rstrip("/"))
     overlap = process.slicing.overlap_ratio
     suppression = process.inference.suppression
     conf_thr = process.inference.conf_threshold
     iou_thr = process.inference.iou_threshold
     batch_size = process.inference.batch_size
-    label       = model_label(dataset_name, arch)
+    label       = model_label(output_name, model_name)
+    engine_key  = engine_key_for_model(model_name)
 
-    weights = resolve_checkpoint(paths.models, dataset_name, fold, arch)
+    weights = resolve_checkpoint(paths.models, weights_dataset, fold, model_name)
     test_dir = os.path.join(process.dataset.output_path, f"fold_{fold}", "test")
-    vis_dir = os.path.join(paths.results, dataset_name, arch, f"fold_{fold}")
+    vis_dir = os.path.join(paths.results, output_name, model_name, f"fold_{fold}")
 
     if not os.path.isdir(os.path.join(test_dir, "images")):
         tqdm.write(f"  [SKIP] test dir not found: {test_dir}")
         return
 
-    tqdm.write(f"  Loading {arch}: {weights}")
-    engine     = make_engine(arch, weights, device="cuda")
+    tqdm.write(f"  Loading {model_name} ({engine_key}): {weights}")
+    engine     = make_engine(engine_key, weights, device="cuda")
     slicer     = make_slicer(slicing_mode, overlap)
     loader     = FoldTestLoader(test_dir)
     matcher    = DetectionMatcher(iou_threshold=0.5)
@@ -157,7 +176,7 @@ def run_fold(process, arch: str, fold: int, paths, results_csv, counting_csv) ->
     slicing_times_ms = []
     counting_rows = []
 
-    for image_name in tqdm(images, desc=f"  fold_{fold} [{arch}]", unit="img", ncols=80, leave=True):
+    for image_name in tqdm(images, desc=f"  fold_{fold} [{model_name}]", unit="img", ncols=80, leave=True):
         image, _  = loader.load_image(image_name)
         gt_boxes  = loader.load_gt_boxes(image_name)
 
@@ -217,25 +236,30 @@ def main():
     results_csv = os.path.join(paths.results, "results.csv")
     counting_csv = os.path.join(paths.results, "counting.csv")
 
-    _init_csv(results_csv, _RESULTS_FIELDS)
-    _init_csv(counting_csv, _COUNTING_FIELDS)
+    # Append-only: keep existing results, add the selected setups' rows.
+    _ensure_csv_header(results_csv, _RESULTS_FIELDS)
+    _ensure_csv_header(counting_csv, _COUNTING_FIELDS)
+
+    tqdm.write(f"Setups selecionados: {[p.output_name for p in processes]}")
 
     for process in processes:
-        dataset_name = os.path.basename(process.dataset.output_path.rstrip("/"))
+        output_name = process.output_name
         n_folds = process.crossfolds.n_folds
+        models = process.models
         tqdm.write(f"\n{'='*60}")
-        tqdm.write(f"Process: {dataset_name.upper()}  |  suppression: {process.inference.suppression}")
+        tqdm.write(f"Setup: {output_name.upper()}  |  modelos: {models}  |  "
+                   f"suppression: {process.inference.suppression}")
         tqdm.write(f"{'='*60}")
 
         for fold in tqdm(range(1, n_folds + 1), desc="  folds", unit="fold", ncols=80, leave=True):
             tqdm.write(f"\n[Fold {fold}/{n_folds}]")
-            for arch in _ARCHS:
+            for model_name in models:
                 try:
                     run_fold(
-                        process, arch, fold, paths, results_csv, counting_csv
+                        process, model_name, fold, paths, results_csv, counting_csv
                     )
                 except Exception as exc:
-                    tqdm.write(f"  [ERROR] {dataset_name.upper()} fold_{fold} {arch}: {exc}")
+                    tqdm.write(f"  [ERROR] {output_name.upper()} fold_{fold} {model_name}: {exc}")
 
     tqdm.write(f"\nSalvo: {results_csv}")
     tqdm.write(f"Salvo: {counting_csv}")

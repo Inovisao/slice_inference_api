@@ -1,0 +1,31 @@
+# Setup: SAHI (grade de tiles fixos 640x640)
+# A saida vai por modelo em results/<recorte>/<modelo>/ e o rotulo no CSV e
+# <RECORTE>_<MODELO>. O recorte vem de dataset.output_path.
+
+dataset:
+  input_path: ./dataset/all
+  output_path: ./dataset/sahi
+
+slicing:
+  mode: sahi
+  tile_size: [640, 640]
+  overlap_ratio: 0.1
+
+crossfolds:
+  n_folds: 5
+  seed: 42
+  ioa_threshold: 0.4
+  split_strategy: kfold_holdout
+  val_ratio: 0.15
+  empty_tile_ratio: 0.08
+
+inference:
+  suppression: nms
+  conf_threshold: 0.5
+  iou_threshold: 0.5
+  batch_size: 32
+
+# Modelos a avaliar. Nome livre: o prefixo define o engine
+# (YOLO* -> YOLO Ultralytics, FASTER -> faster_rcnn, DETR -> detr) e tambem o
+# nome da pasta de pesos em pesos/<recorte>/model_checkpoints/fold_N/<modelo>/.
+models: [YOLOV8N, FASTER, DETR]

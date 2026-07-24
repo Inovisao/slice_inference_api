@@ -9,3 +9,5 @@ results/*
 pesos
 results_01
 models/*
+model_checkpoints
+train_model/compara_detectores_torch

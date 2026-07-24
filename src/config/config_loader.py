@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
@@ -15,6 +15,27 @@ from config.settings import (
 _VALID_SLICING_MODES = ("sahi", "asahi", "asahi_rect", "none")
 _VALID_SUPPRESSIONS = ("nms", "bws", "nms_ioa", "wbf", "cluster_diou_nms")
 
+# Model name prefix -> evaluation engine / manifest arch dir.
+# The model name in a setup ('models: [...]') is free-form; its prefix decides
+# the engine, and the name itself is the weights-folder name in pesos/.
+_ENGINE_BY_PREFIX = (
+    ("YOLO", "yolo"),
+    ("FASTER", "faster_rcnn"),
+    ("DETR", "detr"),
+)
+
+
+def engine_dir_for_model(model_name: str) -> str:
+    """Return the manifest arch dir ('yolo'|'faster_rcnn'|'detr') for a model name."""
+    upper = model_name.upper()
+    for prefix, arch_dir in _ENGINE_BY_PREFIX:
+        if upper.startswith(prefix):
+            return arch_dir
+    raise ValueError(
+        f"Cannot infer engine for model '{model_name}'. "
+        f"Name must start with one of: {[p for p, _ in _ENGINE_BY_PREFIX]}"
+    )
+
 
 @dataclass
 class ProcessConfig:
@@ -23,27 +44,41 @@ class ProcessConfig:
     slicing: SlicingConfig
     crossfolds: CrossFoldsConfig
     inference: DataInferenceConfig
+    # output_name = crop folder name (basename of dataset.output_path). Names the
+    # results folder (results/<output_name>/<model>/) and the CSV label prefix.
+    # models: the model variants to evaluate for this crop.
+    output_name: str = ""
+    models: List[str] = field(default_factory=list)
 
 
 class ConfigLoader:
     """
-    Loads config.yaml and exposes all processes as a list of ProcessConfig.
+    Loads config.yaml and exposes the selected setups as ProcessConfig list.
 
-    config.yaml format:
-        processes:
-          - index: 1
-            dataset: { ... }
-            slicing: { ... }
-            crossfolds: { ... }
-            inference: { ... }
-          - index: 2
-            ...
+    Current format (index of setups):
+        setups_to_run: [name, ...]      # which crops to run (defaults to all)
+        setups:
+          - name: <crop>
+            config: configs/<crop>.yaml # file with the block below + models
+
+    Each configs/<crop>.yaml holds:
+        dataset:   { input_path, output_path }   # output_path names the crop
+        slicing:   { mode, tile_size, overlap_ratio }
+        crossfolds:{ ... }
+        inference: { ... }
+        models:    [YOLOV8N, FASTER, DETR, ...]
+
+    output_name is NOT a config field: it is always the crop folder name
+    (basename of dataset.output_path). Output goes to results/<crop>/<model>/
+    and the CSV label is <CROP>_<MODEL>.
+
+    Legacy format (inline `processes: [...]`) is still accepted for back-compat.
     """
 
     def __init__(self, path: str = "config.yaml"):
         config_path = Path(path).resolve()
-        raw = config_path.read_text()
-        cfg = yaml.safe_load(raw)
+        self._base_dir = config_path.parent
+        cfg = yaml.safe_load(config_path.read_text())
 
         paths = cfg.get("paths", {})
         self.paths = AppPaths(
@@ -53,18 +88,52 @@ class ConfigLoader:
             results=paths.get("results", "./results"),
         )
 
-        if "processes" not in cfg:
+        if "setups" in cfg:
+            raw_processes = self._load_setups(cfg)
+        elif "processes" in cfg:
+            raw_processes = list(enumerate(cfg["processes"], start=1))
+            raw_processes = [self._with_index(r, i) for i, r in raw_processes]
+        else:
             raise ValueError(
-                "config.yaml must have a top-level 'processes' list. "
-                "See the format in the file header."
+                "config.yaml must have a top-level 'setups' (new) or "
+                "'processes' (legacy) list."
             )
 
         self._processes: List[ProcessConfig] = [
-            self._parse_process(p) for p in cfg["processes"]
+            self._parse_process(p) for p in raw_processes
         ]
-
         for proc in self._processes:
             self._validate(proc)
+
+    @staticmethod
+    def _with_index(raw: dict, idx: int) -> dict:
+        raw = dict(raw)
+        raw.setdefault("index", idx)
+        return raw
+
+    def _load_setups(self, cfg: dict) -> List[dict]:
+        catalog = {s["name"]: s for s in cfg["setups"]}
+        selected = cfg.get("setups_to_run") or list(catalog.keys())
+        unknown = [n for n in selected if n not in catalog]
+        if unknown:
+            raise ValueError(
+                f"setups_to_run references unknown setups: {unknown}. "
+                f"Available: {sorted(catalog)}"
+            )
+
+        raw_processes = []
+        for i, name in enumerate(selected, start=1):
+            entry = catalog[name]
+            setup_path = (self._base_dir / entry["config"]).resolve()
+            if not setup_path.is_file():
+                raise FileNotFoundError(
+                    f"Setup '{name}' points to missing config: {setup_path}"
+                )
+            block = yaml.safe_load(setup_path.read_text()) or {}
+            block = dict(block)
+            block["index"] = i
+            raw_processes.append(block)
+        return raw_processes
 
     # ------------------------------------------------------------------ #
     # Parsing                                                              #
@@ -106,12 +175,17 @@ class ConfigLoader:
             batch_size=inf.get("batch_size", 32),
         )
 
+        # output_name is always the crop folder name — never a config field.
+        output_name = Path(dataset.output_path).name
+
         return ProcessConfig(
             index=index,
             dataset=dataset,
             slicing=slicing,
             crossfolds=crossfolds,
             inference=inference,
+            output_name=output_name,
+            models=list(raw.get("models", [])),
         )
 
     # ------------------------------------------------------------------ #

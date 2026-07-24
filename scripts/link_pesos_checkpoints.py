@@ -1,13 +1,15 @@
 """Generate manifest.json shims under models/ pointing at pesos/ checkpoints.
 
-pesos/ holds the raw weights from an external training run, laid out
-differently per mode (sahi/asahi nest under `model_checkpoints/`, asahi_rect
-does not) and per architecture (YOLOV8/Faster/Detr, each with its own weight
-filename). geraResultados.py resolves checkpoints through
-`models/<mode>/fold_N/<yolo|faster_rcnn|detr>/manifest.json`, so this
-script writes that manifest at the canonical location for every
-mode x fold x architecture found in pesos/, without moving or duplicating
-the (large) weight files themselves.
+pesos/ holds the raw training weights, laid out per crop mode
+(sahi/asahi/asahi_rect/all_640) and per MODEL VARIANT folder — e.g. YOLOV8N,
+YOLOV8L, Faster, Detr. The model-variant folder name is free-form; its prefix
+decides the engine (YOLO* -> ultralytics, FASTER -> faster_rcnn, DETR -> detr),
+which in turn decides where the actual weight file sits inside that folder.
+
+geraResultados.py resolves checkpoints through
+`models/<crop>/fold_N/<MODEL_NAME>/manifest.json`, so this script discovers every
+model-variant folder present in pesos/ and writes that manifest at the canonical
+location — without moving or duplicating the (large) weight files.
 """
 
 import json
@@ -20,11 +22,21 @@ MODELS_ROOT = REPO_ROOT / "models"
 _MODES = ("sahi", "asahi", "asahi_rect", "all_640")
 _N_FOLDS = 5
 
-_ARCHS = {
-    "yolo": ("YOLOV8", [Path("train/weights/best.pt")]),
-    "faster_rcnn": ("Faster", [Path("best.pth")]),
-    "detr": ("Detr", [Path("training/best_model.pth"), Path("best_model.pth")]),
+# engine (by model-name prefix) -> candidate weight paths inside the model folder
+_WEIGHTS_BY_ENGINE = {
+    "yolo": [Path("train/weights/best.pt")],
+    "faster_rcnn": [Path("best.pth")],
+    "detr": [Path("training/best_model.pth"), Path("best_model.pth")],
 }
+_ENGINE_BY_PREFIX = (("YOLO", "yolo"), ("FASTER", "faster_rcnn"), ("DETR", "detr"))
+
+
+def _engine_for(model_name: str) -> str | None:
+    up = model_name.upper()
+    for prefix, engine in _ENGINE_BY_PREFIX:
+        if up.startswith(prefix):
+            return engine
+    return None
 
 
 def _pesos_fold_dir(mode: str, fold: int) -> Path:
@@ -33,33 +45,41 @@ def _pesos_fold_dir(mode: str, fold: int) -> Path:
     return nested if nested.is_dir() else flat
 
 
-def _find_checkpoint(fold_dir: Path, pesos_arch: str, candidates: list[Path]) -> Path | None:
-    arch_dir = fold_dir / pesos_arch
-    for rel_checkpoint in candidates:
-        checkpoint = arch_dir / rel_checkpoint
-        if checkpoint.is_file():
-            return checkpoint
+def _find_weight(model_dir: Path, engine: str) -> Path | None:
+    for rel in _WEIGHTS_BY_ENGINE[engine]:
+        cand = model_dir / rel
+        if cand.is_file():
+            return cand
     return None
 
 
 def main() -> None:
-    written, missing = 0, []
+    written, missing, skipped = 0, [], []
 
     for mode in _MODES:
         for fold in range(1, _N_FOLDS + 1):
             fold_dir = _pesos_fold_dir(mode, fold)
-            for manifest_arch, (pesos_arch, candidates) in _ARCHS.items():
-                checkpoint = _find_checkpoint(fold_dir, pesos_arch, candidates)
+            if not fold_dir.is_dir():
+                continue
+            # Every subfolder is a model variant (YOLOV8N, YOLOV8L, Faster, Detr, ...)
+            for model_dir in sorted(p for p in fold_dir.iterdir() if p.is_dir()):
+                model_name = model_dir.name
+                engine = _engine_for(model_name)
+                if engine is None:
+                    skipped.append(f"{fold_dir}/{model_name} (unknown engine)")
+                    continue
+                checkpoint = _find_weight(model_dir, engine)
                 if checkpoint is None:
-                    missing.append(str(fold_dir / pesos_arch / candidates[0]))
+                    missing.append(str(model_dir))
                     continue
 
-                manifest_dir = MODELS_ROOT / mode / f"fold_{fold}" / manifest_arch
+                manifest_dir = MODELS_ROOT / mode / f"fold_{fold}" / model_name
                 manifest_dir.mkdir(parents=True, exist_ok=True)
                 manifest = {
                     "mode": mode,
                     "fold": fold,
-                    "architecture": manifest_arch,
+                    "model": model_name,
+                    "engine": engine,
                     "checkpoint": str(checkpoint),
                     "source": "pesos",
                 }
@@ -69,8 +89,12 @@ def main() -> None:
                 written += 1
 
     print(f"manifests written: {written}")
+    if skipped:
+        print(f"skipped ({len(skipped)}):")
+        for s in skipped:
+            print(f"  {s}")
     if missing:
-        print(f"checkpoints not found ({len(missing)}):")
+        print(f"weight file not found in ({len(missing)}):")
         for path in missing:
             print(f"  {path}")
 

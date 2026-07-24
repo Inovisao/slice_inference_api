@@ -1,119 +1,133 @@
 """
-Validates config.yaml before running the inference pipeline.
+Validates the setup configs before running the inference pipeline.
 All assertions here are preconditions — if any fails, geraResultados.py will break.
+
+The config.yaml is an index of setups (configs/<name>.yaml). These tests load
+EVERY setup in the catalog through ConfigLoader (the pipeline's source of truth)
+by temporarily selecting all of them, so any activatable setup is validated.
 """
+
+import copy
 
 import pytest
 import yaml
 
+from config.config_loader import ConfigLoader, engine_dir_for_model
+
 _VALID_MODES = ("sahi", "asahi", "asahi_rect", "none")
 _VALID_SUPPRESSIONS = ("nms", "bws", "nms_ioa", "wbf", "cluster_diou_nms")
-_REQUIRED_PROCESS_KEYS = ("dataset", "slicing", "crossfolds", "inference")
 
 
 @pytest.fixture(scope="module")
-def config():
+def raw_config():
     with open("config.yaml") as f:
         return yaml.safe_load(f)
 
 
 @pytest.fixture(scope="module")
-def processes(config):
-    return config["processes"]
+def all_processes(tmp_path_factory, raw_config):
+    """Load ALL cataloged setups through ConfigLoader (not just setups_to_run)."""
+    cfg = copy.deepcopy(raw_config)
+    cfg["setups_to_run"] = [s["name"] for s in cfg["setups"]]
+    tmp = tmp_path_factory.mktemp("cfg")
+    tmp_cfg = tmp / "config.yaml"
+    # ConfigLoader resolves setup paths relative to the config file's dir, so
+    # point the temp config's setup paths at the real absolute configs/.
+    import os
+    for s in cfg["setups"]:
+        s["config"] = os.path.abspath(s["config"])
+    tmp_cfg.write_text(yaml.safe_dump(cfg))
+    return ConfigLoader(str(tmp_cfg)).processes
 
 
 class TestConfigStructure:
-    def test_has_global_paths(self, config):
-        paths = config.get("paths", {})
+    def test_has_global_paths(self, raw_config):
+        paths = raw_config.get("paths", {})
         for key in ("source_dataset", "generated_datasets", "models", "results"):
             assert paths.get(key), f"Global path is missing: '{key}'"
 
-    def test_has_processes_key(self, config):
-        assert "processes" in config
+    def test_has_setups_index(self, raw_config):
+        assert "setups" in raw_config and isinstance(raw_config["setups"], list)
+        assert raw_config["setups"], "setups catalog is empty"
 
-    def test_processes_is_non_empty_list(self, processes):
-        assert isinstance(processes, list) and len(processes) > 0
+    def test_setups_to_run_is_subset_of_catalog(self, raw_config):
+        catalog = {s["name"] for s in raw_config["setups"]}
+        for name in raw_config.get("setups_to_run", []):
+            assert name in catalog, f"setups_to_run references unknown setup '{name}'"
 
-    def test_each_process_has_required_keys(self, processes):
-        for p in processes:
-            for key in _REQUIRED_PROCESS_KEYS:
-                assert key in p, f"Process {p.get('index')} missing key: '{key}'"
+    def test_all_setups_load(self, all_processes):
+        assert len(all_processes) > 0
+
+
+class TestSetupIdentity:
+    def test_each_setup_has_output_name(self, all_processes):
+        for p in all_processes:
+            assert p.output_name, f"process {p.index} missing output_name"
+
+    def test_each_setup_has_models(self, all_processes):
+        for p in all_processes:
+            assert p.models, f"setup {p.output_name} has empty models list"
+
+    def test_model_names_map_to_engine(self, all_processes):
+        for p in all_processes:
+            for m in p.models:
+                # raises if the prefix is unknown
+                assert engine_dir_for_model(m) in {"yolo", "faster_rcnn", "detr"}
 
 
 class TestSlicingConfig:
-    def test_mode_is_valid(self, processes):
-        for p in processes:
-            mode = p["slicing"].get("mode")
-            assert mode in _VALID_MODES, f"Invalid slicing mode: '{mode}'"
+    def test_mode_is_valid(self, all_processes):
+        for p in all_processes:
+            assert p.slicing.slicing_mode in _VALID_MODES, \
+                f"Invalid slicing mode: '{p.slicing.slicing_mode}'"
 
-    def test_overlap_ratio_in_range(self, processes):
-        for p in processes:
-            overlap = p["slicing"].get("overlap_ratio")
-            assert overlap is not None, "overlap_ratio is missing"
-            if p["slicing"].get("mode") == "none":
-                assert overlap == 0.0, f"'none' mode has no tiles; overlap_ratio should be 0.0, got {overlap}"
-                continue
-            assert 0.0 < overlap < 1.0, f"overlap_ratio must be in (0, 1), got {overlap}"
+    def test_overlap_ratio_in_range(self, all_processes):
+        for p in all_processes:
+            overlap = p.slicing.overlap_ratio
+            if p.slicing.slicing_mode == "none":
+                assert overlap == 0.0
+            else:
+                assert 0.0 < overlap < 1.0, f"overlap_ratio must be in (0,1), got {overlap}"
 
-    def test_tile_size_is_positive(self, processes):
-        for p in processes:
-            tile = p["slicing"].get("tile_size", [])
-            assert len(tile) == 2 and all(v > 0 for v in tile), \
-                f"tile_size must be [w, h] with positive values, got {tile}"
+    def test_tile_size_is_positive(self, all_processes):
+        for p in all_processes:
+            tile = p.slicing.tile_size
+            assert len(tile) == 2 and all(v > 0 for v in tile)
+
 
 class TestCrossFoldsConfig:
-    def test_n_folds_at_least_two(self, processes):
-        for p in processes:
-            n = p["crossfolds"].get("n_folds", 0)
-            assert n >= 2, f"n_folds must be >= 2, got {n}"
+    def test_n_folds_at_least_two(self, all_processes):
+        for p in all_processes:
+            assert p.crossfolds.n_folds >= 2
 
-    def test_val_ratio_in_range(self, processes):
-        for p in processes:
-            cf = p["crossfolds"]
-            val_ratio = cf.get("val_ratio")
-            assert val_ratio is not None and 0.0 < val_ratio < 1.0
+    def test_val_ratio_in_range(self, all_processes):
+        for p in all_processes:
+            assert 0.0 < p.crossfolds.val_ratio < 1.0
 
-    def test_split_strategy_is_valid(self, processes):
-        for p in processes:
-            cf = p["crossfolds"]
-            assert cf.get("split_strategy") in {"kfold_holdout", "fixed_ratios"}
+    def test_split_strategy_is_valid(self, all_processes):
+        for p in all_processes:
+            assert p.crossfolds.split_strategy in {"kfold_holdout", "fixed_ratios"}
 
-    def test_fixed_ratio_strategy_has_valid_test_ratio(self, processes):
-        for p in processes:
-            cf = p["crossfolds"]
-            if cf.get("split_strategy") != "fixed_ratios":
-                continue
-            test_ratio = cf.get("test_ratio")
-            assert test_ratio is not None and 0.0 < test_ratio < 1.0
-            assert cf["val_ratio"] + test_ratio < 1.0
-
-    def test_current_config_documents_trained_split_protocol(self, processes):
-        for p in processes:
-            cf = p["crossfolds"]
-            assert cf["split_strategy"] == "kfold_holdout"
-            assert cf["n_folds"] == 5
-            assert cf["val_ratio"] == 0.15
+    def test_current_config_documents_trained_split_protocol(self, all_processes):
+        for p in all_processes:
+            assert p.crossfolds.split_strategy == "kfold_holdout"
+            assert p.crossfolds.n_folds == 5
+            assert p.crossfolds.val_ratio == 0.15
 
 
 class TestInferenceConfig:
-    def test_suppression_is_valid(self, processes):
-        for p in processes:
-            s = p["inference"].get("suppression")
-            assert s in _VALID_SUPPRESSIONS, f"Invalid suppression: '{s}'"
+    def test_suppression_is_valid(self, all_processes):
+        for p in all_processes:
+            assert p.inference.suppression in _VALID_SUPPRESSIONS
 
-    def test_conf_threshold_in_range(self, processes):
-        for p in processes:
-            conf = p["inference"].get("conf_threshold")
-            assert conf is not None and 0.0 < conf <= 1.0, \
-                f"conf_threshold must be in (0, 1], got {conf}"
+    def test_conf_threshold_in_range(self, all_processes):
+        for p in all_processes:
+            assert 0.0 < p.inference.conf_threshold <= 1.0
 
-    def test_iou_threshold_in_range(self, processes):
-        for p in processes:
-            iou = p["inference"].get("iou_threshold")
-            assert iou is not None and 0.0 < iou <= 1.0, \
-                f"iou_threshold must be in (0, 1], got {iou}"
+    def test_iou_threshold_in_range(self, all_processes):
+        for p in all_processes:
+            assert 0.0 < p.inference.iou_threshold <= 1.0
 
-    def test_batch_size_positive(self, processes):
-        for p in processes:
-            bs = p["inference"].get("batch_size", 32)
-            assert bs > 0, f"batch_size must be positive, got {bs}"
+    def test_batch_size_positive(self, all_processes):
+        for p in all_processes:
+            assert p.inference.batch_size > 0
