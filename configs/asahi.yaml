@@ -1,4 +1,4 @@
-# Setup: ASAHI (tile quadrado adaptativo)
+# Setup: ASAHI (adaptive slicing; grade 3x2 ou 4x3 conforme threshold T)
 
 dataset:
   input_path: ./dataset/all
@@ -23,4 +23,4 @@ inference:
   iou_threshold: 0.5
   batch_size: 32
 
-models: [YOLOV8N, FASTER, DETR]
+models: [DETR, Faster, YOLOV8N]

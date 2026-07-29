@@ -160,7 +160,7 @@ def _print_process_preview(proc: ProcessConfig) -> float:
         print(f"\n  [!] Nenhuma imagem com width/height no JSON — execute o preprocessor primeiro")
         return 0.0
 
-    slicer = make_slicer(s.slicing_mode, s.overlap_ratio)
+    slicer = make_slicer(s.slicing_mode, s.overlap_ratio, s.tile_size)
     geoms: List[Tuple[Tuple[int, int], int, GeometryParams]] = [
         ((w, h), count, compute_geometry(slicer, w, h))
         for (w, h), count in sorted(resolutions.items())
@@ -274,6 +274,12 @@ def _parse_args(argv=None):
         dest="processes",
         help="Run only this process index (repeatable).",
     )
+    parser.add_argument(
+        "--setup",
+        action="append",
+        dest="setups",
+        help="Run only this setup name from config.yaml (repeatable), e.g. --setup sahi.",
+    )
     parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt.")
     return parser.parse_args(argv)
 
@@ -289,6 +295,15 @@ def main(argv=None):
         sys.exit(1)
 
     processes = loader.processes
+    if args.setups:
+        requested_setups = {name.strip() for name in args.setups if name.strip()}
+        processes = [proc for proc in processes if proc.output_name in requested_setups]
+        found = {proc.output_name for proc in processes}
+        missing = sorted(requested_setups - found)
+        if missing:
+            print(f"[ERRO] Setup(s) inexistente(s): {missing}")
+            sys.exit(2)
+
     if args.processes:
         requested = set(args.processes)
         processes = [proc for proc in processes if proc.index in requested]

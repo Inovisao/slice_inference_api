@@ -1,13 +1,20 @@
+import sys
+from pathlib import Path
 from typing import Generator, Tuple
 
 import cv2
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from ultralytics import YOLO
+
+_TRAIN_SRC_DIR = Path(__file__).resolve().parents[2] / "train_model" / "compara_detectores_torch" / "src"
+if str(_TRAIN_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_TRAIN_SRC_DIR))
+
+from Detectors.Detr.detection.detr.model import DETRModel
 
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -173,37 +180,54 @@ class FasterInferenceEngine:
 
 # ─── DETR ─────────────────────────────────────────────────────────────────────
 
-class _DETRWrapper(nn.Module):
-    """Thin wrapper that loads a DETR checkpoint with torch.compile prefixes stripped.
-    The checkpoint uses DETR's original class_embed head (shape [N_classes, 256]).
-    No extra linear is added — pred_logits is used as-is from the base model."""
-
-    def __init__(self):
-        super().__init__()
-        self.model = torch.hub.load("facebookresearch/detr", "detr_resnet50",
-                                    pretrained=False, verbose=False)
-
-    def forward(self, images):
-        return self.model(images)
-
 
 class DetrInferenceEngine:
+    _RESIZE_TO = 640
+
     def __init__(self, model_path: str, device: str = "cuda"):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
-        model = _DETRWrapper()
-        state = torch.load(model_path, map_location="cpu")
-        state = state.get("model_state_dict", state)
+        checkpoint = torch.load(model_path, map_location="cpu")
+        config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
+        classes = config.get("CLASSES") or config.get("classes") or []
+        num_classes = (
+            config.get("NC")
+            or config.get("num_classes")
+            or (len(classes) if classes else None)
+        )
+        if not num_classes:
+            state_for_shape = checkpoint.get("model_state_dict", checkpoint)
+            head = state_for_shape.get("out.weight")
+            if head is None:
+                head = state_for_shape.get("_orig_mod.out.weight")
+            if head is None:
+                raise RuntimeError(
+                    f"DETR checkpoint has no class config and no out.weight head: {model_path}"
+                )
+            num_classes = int(head.shape[0])
+
+        model = DETRModel(num_classes=int(num_classes), model="detr_resnet50")
+        state = checkpoint.get("model_state_dict", checkpoint)
         state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
         missing, unexpected = model.load_state_dict(state, strict=False)
-        if missing:
-            raise RuntimeError(f"DETR checkpoint missing keys: {missing[:5]}")
+        critical_missing = [k for k in missing if k.startswith("out.")]
+        if critical_missing:
+            raise RuntimeError(f"DETR checkpoint missing trained head keys: {critical_missing}")
+        if unexpected:
+            raise RuntimeError(f"DETR checkpoint has unexpected keys: {unexpected[:5]}")
         self.model = model.to(self.device).eval()
-        # Number of output classes = class_embed output size minus the DETR no-object slot
-        self._n_classes = model.model.class_embed.out_features - 1
+        # The wrapper's final `out` layer includes foreground classes + DETR no-object.
+        self._n_classes = int(num_classes) - 1
+        if classes and len(classes) == int(num_classes):
+            self.class_names = {idx: name for idx, name in enumerate(classes[1:])}
+        else:
+            self.class_names = {idx: f"cls_{idx}" for idx in range(self._n_classes)}
 
     def _preprocess(self, frame: np.ndarray) -> torch.Tensor:
-        img = cv2.resize(frame, (640, 640))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        orig_h, orig_w = frame.shape[:2]
+        scale = self._RESIZE_TO / max(orig_h, orig_w)
+        if scale != 1.0:
+            frame = cv2.resize(frame, (int(orig_w * scale), int(orig_h * scale)))
+        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         img = (img - _IMAGENET_MEAN) / _IMAGENET_STD
         return torch.from_numpy(img.transpose(2, 0, 1)).float()
 
@@ -254,7 +278,7 @@ class DetrInferenceEngine:
         for i in range(0, len(tiles), batch_size):
             batch = tiles[i:i + batch_size]
             batch_coords = coords_list[i:i + batch_size]
-            tensors = torch.stack([self._preprocess(t) for t in batch]).to(self.device, non_blocking=True)
+            tensors = [self._preprocess(t).to(self.device, non_blocking=True) for t in batch]
             with torch.no_grad():
                 outputs = self.model(tensors)
             self._decode_batch(outputs, batch_coords, img_w, img_h, conf_thr,
@@ -268,11 +292,9 @@ class DetrInferenceEngine:
         """Runs one DETR pass over the complete image."""
         img_h, img_w = image.shape[:2]
         boxes, scores, labels = [], [], []
-        tensor = self._preprocess(image).unsqueeze(0).to(
-            self.device, non_blocking=True
-        )
+        tensor = self._preprocess(image).to(self.device, non_blocking=True)
         with torch.no_grad():
-            outputs = self.model(tensor)
+            outputs = self.model([tensor])
         full_coord = [{"x": 0, "y": 0, "width": img_w, "height": img_h}]
         self._decode_batch(
             outputs, full_coord, img_w, img_h, conf_thr, boxes, scores, labels

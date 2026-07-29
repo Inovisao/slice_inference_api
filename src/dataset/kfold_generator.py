@@ -17,6 +17,7 @@ from tqdm import tqdm
 from config.settings import SlicingConfig
 from slicing.asahi import Asahi
 from slicing.asahi_rect import AsahiRect
+from slicing.none import NoSlice
 from slicing.service import make_slicer
 
 _COCO_FILENAME = "_annotations.coco.json"
@@ -148,9 +149,14 @@ def compute_geometry(slicer, img_w: int, img_h: int) -> "GeometryParams":
         p = f"{tile_w}x{tile_h}"
         tile_area = tile_w * tile_h
     elif isinstance(slicer, Asahi):
-        p = slicer.compute_tile_size(img_w, img_h)
-        cols, rows = slicer.compute_grid(img_w, img_h, p)
-        tile_area = p * p
+        cols, rows = slicer.compute_grid(img_w, img_h)
+        tile_w, tile_h = slicer.compute_tile_size(img_w, img_h)
+        p = f"{tile_w}x{tile_h}"
+        tile_area = tile_w * tile_h
+    elif isinstance(slicer, NoSlice):
+        cols = rows = 0
+        p = "none"
+        tile_area = 0
     else:
         tile_w, tile_h = slicer.slicing_config.tile_size
         stride_x, stride_y = slicer.compute_stride()
@@ -225,7 +231,11 @@ class AsahiKFoldValidator:
         self.groups = groups
 
         self._target_size: Tuple[int, int] = slicing_config.tile_size  # (640, 640)
-        self._slicer = make_slicer(slicing_config.slicing_mode, slicing_config.overlap_ratio)
+        self._slicer = make_slicer(
+            slicing_config.slicing_mode,
+            slicing_config.overlap_ratio,
+            slicing_config.tile_size,
+        )
         self._is_asahi = isinstance(self._slicer, Asahi)
         self._is_asahi_rect = isinstance(self._slicer, AsahiRect)
         self._rng = np.random.default_rng(seed)
@@ -548,11 +558,10 @@ class AsahiKFoldValidator:
             tile_w, tile_h = coords["width"], coords["height"]
             tile_stem = f"{stem}_tile_{x_off}_{y_off}"
 
-            # ASAHI: resize com interpolação inteligente baseada na direção de escala
+            # Adaptive slices can be non-square; letterbox keeps the bbox geometry consistent.
             if self._is_asahi:
-                interp = cv2.INTER_AREA if tile_w > tw else cv2.INTER_CUBIC
-                tile = cv2.resize(tile, (tw, th), interpolation=interp)
-                tile_pad = None
+                tile, pad_x, pad_y, scale = self._letterbox(tile)
+                tile_pad = (pad_x, pad_y, scale)
             elif self._is_asahi_rect:
                 tile, pad_x, pad_y, scale = self._letterbox(tile)
                 tile_pad = (pad_x, pad_y, scale)
@@ -803,6 +812,12 @@ class AsahiKFoldValidator:
                     box_h = bh * height
                     x = (cx * width) - box_w / 2
                     y = (cy * height) - box_h / 2
+                    x = max(0.0, min(x, float(width)))
+                    y = max(0.0, min(y, float(height)))
+                    box_w = min(box_w, float(width) - x)
+                    box_h = min(box_h, float(height) - y)
+                    if box_w <= 0 or box_h <= 0:
+                        continue
                     category = categories[cls_idx] if cls_idx < len(categories) else None
                     category_id = category["id"] if category else cls_idx
                     annotations.append({
@@ -927,6 +942,104 @@ class AsahiKFoldValidator:
         print(f"  resolution_groups.csv")
         print(f"  per_image_metrics.csv")
 
+    def _write_dataset_manifest(self) -> None:
+        categories = sorted(self._coco["categories"], key=lambda c: c["id"])
+        tile_w, tile_h = self._target_size
+        tile_shape = "rectangular" if tile_w != tile_h or self._is_asahi_rect else "square"
+
+        manifest = {
+            "contract_version": "1.0",
+            "dataset_name": Path(self.output_root).name,
+            "dataset_type": "tiled_detection_crossfold",
+            "annotation_format": "coco",
+            "category_id_base": 1,
+            "splits": ["train", "val", "test"],
+            "folds": [f"fold_{idx}" for idx in range(1, self.n_splits + 1)],
+            "layout": {
+                "annotations_dir": _SPLIT_JSON_DIR,
+                "annotation_pattern": "{fold}_{split}.json",
+                "image_dir_pattern": "{fold}/{split}/images",
+                "label_dir_pattern": "{fold}/{split}/labels",
+                "fold_info_dir": _INFO_DIR,
+                "fold_yaml_pattern": "{fold}.yaml",
+            },
+            "split_protocol": {
+                "strategy": self.split_strategy,
+                "n_folds": self.n_splits,
+                "seed": self.seed,
+                "val_ratio": self.val_ratio,
+                "test_ratio": self.test_ratio,
+                "empty_tile_ratio": self.empty_tile_ratio,
+                "ioa_threshold": self.ioa_threshold,
+            },
+            "tiling": {
+                "mode": self.slicing_config.slicing_mode,
+                "evaluation_mode": "basic",
+                "tile_shape": tile_shape,
+                "tile_width": tile_w,
+                "tile_height": tile_h,
+                "overlap_ratio": self.slicing_config.overlap_ratio,
+                "variable_tile_size": False,
+                "tiles_are_primary_samples": True,
+                "requires_reconstruction": False,
+            },
+            "classes": [
+                {"id": int(category["id"]), "name": category["name"]}
+                for category in categories
+            ],
+        }
+
+        manifest_path = os.path.join(self.output_root, "dataset_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, ensure_ascii=False)
+
+    def _validate_generated_files(self) -> None:
+        errors: List[str] = []
+        json_dir = os.path.join(self.output_root, _SPLIT_JSON_DIR)
+        for fold_index in range(1, self.n_splits + 1):
+            for split in ("train", "val", "test"):
+                split_dir = os.path.join(self.output_root, f"fold_{fold_index}", split, "images")
+                json_path = os.path.join(json_dir, f"fold_{fold_index}_{split}.json")
+
+                if not os.path.isdir(split_dir):
+                    errors.append(f"missing image directory: {split_dir}")
+                    continue
+                if not os.path.isfile(json_path):
+                    errors.append(f"missing annotation JSON: {json_path}")
+                    continue
+
+                with open(json_path, encoding="utf-8") as f:
+                    data = json.load(f)
+
+                image_dims: Dict[int, Tuple[float, float]] = {}
+                for image in data.get("images", []):
+                    image_id = int(image["id"])
+                    file_name = image["file_name"]
+                    width = float(image["width"])
+                    height = float(image["height"])
+                    image_dims[image_id] = (width, height)
+                    if not os.path.isfile(os.path.join(split_dir, file_name)):
+                        errors.append(f"{os.path.basename(json_path)} missing image: {file_name}")
+
+                for ann in data.get("annotations", []):
+                    ann_id = int(ann["id"])
+                    image_id = int(ann["image_id"])
+                    if image_id not in image_dims:
+                        errors.append(f"{os.path.basename(json_path)} annotation {ann_id} unknown image_id")
+                        continue
+                    x, y, box_w, box_h = [float(value) for value in ann["bbox"]]
+                    image_w, image_h = image_dims[image_id]
+                    if x < 0 or y < 0 or box_w <= 0 or box_h <= 0:
+                        errors.append(f"{os.path.basename(json_path)} annotation {ann_id} invalid bbox")
+                    elif x + box_w > image_w + 1.0 or y + box_h > image_h + 1.0:
+                        errors.append(f"{os.path.basename(json_path)} annotation {ann_id} bbox exceeds image")
+
+        if errors:
+            preview = "\n".join(f"  - {error}" for error in errors[:20])
+            if len(errors) > 20:
+                preview += f"\n  ... and {len(errors) - 20} more"
+            raise RuntimeError(f"Generated dataset failed integrity validation:\n{preview}")
+
     # ------------------------------------------------------------------ #
     # Public API                                                           #
     # ------------------------------------------------------------------ #
@@ -941,6 +1054,37 @@ class AsahiKFoldValidator:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(stats.to_full_dict(), f, ensure_ascii=False)
+
+    def _cleanup_run_artifacts(self) -> None:
+        """Remove derived metadata before a fresh full generation."""
+        for dirname in (_SPLIT_JSON_DIR, _INFO_DIR):
+            path = os.path.join(self.output_root, dirname)
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+
+        for fname in (
+            "dataset_manifest.json",
+            "summary_report.json",
+            "resolution_groups.csv",
+            "per_image_metrics.csv",
+        ):
+            path = os.path.join(self.output_root, fname)
+            if os.path.isfile(path):
+                os.remove(path)
+
+    def _cleanup_fold_artifacts(self, fold_index: int) -> None:
+        """Remove metadata for a fold before rematerialising it."""
+        json_dir = os.path.join(self.output_root, _SPLIT_JSON_DIR)
+        for split in ("train", "val", "test"):
+            path = os.path.join(json_dir, f"fold_{fold_index}_{split}.json")
+            if os.path.isfile(path):
+                os.remove(path)
+
+        info_dir = os.path.join(self.output_root, _INFO_DIR)
+        for fname in (f"fold_{fold_index}.yaml", f"fold_{fold_index}_stats.json"):
+            path = os.path.join(info_dir, fname)
+            if os.path.isfile(path):
+                os.remove(path)
 
     def _load_fold_stats(self, fold_index: int) -> Optional[FoldStats]:
         path = self._stats_path(fold_index)
@@ -963,6 +1107,7 @@ class AsahiKFoldValidator:
         fold_dir = os.path.join(self.output_root, f"fold_{fold_index}")
         if os.path.isdir(fold_dir):
             shutil.rmtree(fold_dir)
+        self._cleanup_fold_artifacts(fold_index)
         train_dir = os.path.join(fold_dir, "train")
         val_dir = os.path.join(fold_dir, "val")
         test_dir = os.path.join(fold_dir, "test")
@@ -1016,6 +1161,8 @@ class AsahiKFoldValidator:
             )
 
         os.makedirs(self.output_root, exist_ok=True)
+        if resume_from == 1:
+            self._cleanup_run_artifacts()
         results: List[FoldStats] = []
 
         for fold_index, (train_imgs, val_imgs, test_imgs) in enumerate(
@@ -1045,4 +1192,6 @@ class AsahiKFoldValidator:
             results.append(stats)
 
         self._write_reports(results)
+        self._write_dataset_manifest()
+        self._validate_generated_files()
         return results

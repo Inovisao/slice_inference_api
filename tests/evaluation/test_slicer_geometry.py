@@ -7,14 +7,27 @@ Validates slicer geometry guarantees that the inference pipeline depends on:
 """
 
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+from config.config_loader import ConfigLoader
 from slicing.asahi import Asahi
 from slicing.asahi_rect import AsahiRect
 from slicing.sahi import Sahi
 from config.settings import SlicingConfig
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _selected_slicing_config(mode: str) -> SlicingConfig:
+    loader = ConfigLoader(str(_PROJECT_ROOT / "config.yaml"))
+    for process in loader.processes:
+        if process.slicing.slicing_mode == mode:
+            return process.slicing
+    pytest.skip(f"Setup '{mode}' is not selected in config.yaml")
 
 
 def _asahi_config(overlap: float) -> SlicingConfig:
@@ -45,17 +58,17 @@ def _blank_image(w: int, h: int) -> np.ndarray:
 _IMAGE_SIZES_ASAHI = [(4032, 2268), (4000, 3000), (1920, 1080), (800, 600)]
 # SAHI uses fixed 640×640 tiles — only test images larger than the tile in both dims
 _IMAGE_SIZES_SAHI = [(4032, 2268), (4000, 3000), (1920, 1080)]
-_OVERLAPS = [0.1, 0.15, 0.2, 0.3]
+_OVERLAPS = sorted({0.1, _selected_slicing_config("asahi").overlap_ratio, 0.2, 0.3})
 
 
 class TestAsahiRectGeometry:
     def test_reference_image_uses_four_by_two_grid(self):
-        slicer = AsahiRect(_asahi_rect_config(0.15))
+        slicer = AsahiRect(_selected_slicing_config("asahi_rect"))
         assert slicer.compute_grid(4032, 2268) == (4, 2)
         assert slicer.compute_tile_size(4032, 2268, 4, 2) == (1136, 1226)
 
     def test_reference_image_redundancy_is_about_twenty_two_percent(self):
-        slicer = AsahiRect(_asahi_rect_config(0.15))
+        slicer = AsahiRect(_selected_slicing_config("asahi_rect"))
         tiles = list(slicer.generate_tiles(_blank_image(4032, 2268)))
         total_area = sum(c["width"] * c["height"] for _, c in tiles)
         redundancy = (total_area - 4032 * 2268) / (4032 * 2268)
@@ -82,6 +95,28 @@ class TestAsahiRectGeometry:
 @pytest.mark.parametrize("img_w,img_h", _IMAGE_SIZES_ASAHI)
 @pytest.mark.parametrize("overlap", _OVERLAPS)
 class TestAsahiGeometry:
+    def test_reference_image_uses_canonical_four_by_three_grid(self, img_w, img_h, overlap):
+        config = _selected_slicing_config("asahi")
+        slicer = Asahi(config)
+        l = config.overlap_ratio
+        expected_tile = (
+            math.ceil(4032 / (4 - 3 * l) + 1),
+            math.ceil(2268 / (3 - 2 * l) + 1),
+        )
+        assert slicer.compute_grid(4032, 2268) == (4, 3)
+        assert slicer.compute_tile_size(4032, 2268) == expected_tile
+
+    def test_reference_image_redundancy_matches_canonical_asahi(self, img_w, img_h, overlap):
+        config = _selected_slicing_config("asahi")
+        slicer = Asahi(config)
+        tiles = list(slicer.generate_tiles(_blank_image(4032, 2268)))
+        total_area = sum(c["width"] * c["height"] for _, c in tiles)
+        redundancy = (total_area - 4032 * 2268) / (4032 * 2268)
+        tile_w, tile_h = slicer.compute_tile_size(4032, 2268)
+        expected_redundancy = ((4 * 3 * tile_w * tile_h) - 4032 * 2268) / (4032 * 2268)
+        assert len(tiles) == 12
+        assert redundancy == pytest.approx(expected_redundancy, abs=0.001)
+
     def _tiles(self, img_w, img_h, overlap):
         slicer = Asahi(_asahi_config(overlap))
         image = _blank_image(img_w, img_h)
@@ -89,8 +124,9 @@ class TestAsahiGeometry:
 
     def test_tile_size_does_not_exceed_image(self, img_w, img_h, overlap):
         slicer = Asahi(_asahi_config(overlap))
-        p = slicer.compute_tile_size(img_w, img_h)
-        assert p <= min(img_w, img_h), f"p={p} exceeds min({img_w},{img_h})"
+        tile_w, tile_h = slicer.compute_tile_size(img_w, img_h)
+        assert tile_w <= img_w
+        assert tile_h <= img_h
 
     def test_no_tile_exceeds_image_bounds(self, img_w, img_h, overlap):
         for _, coords in self._tiles(img_w, img_h, overlap):
@@ -105,8 +141,7 @@ class TestAsahiGeometry:
 
     def test_tile_count_matches_grid_formula(self, img_w, img_h, overlap):
         slicer = Asahi(_asahi_config(overlap))
-        p = slicer.compute_tile_size(img_w, img_h)
-        a, b = slicer.compute_grid(img_w, img_h, p)
+        a, b = slicer.compute_grid(img_w, img_h)
         tiles = self._tiles(img_w, img_h, overlap)
         assert len(tiles) == a * b
 

@@ -13,9 +13,10 @@ def make_inference_pipeline(
     device: str,
     include_full_inference: bool | None = None,
     batch_size: int = 32,
+    tile_size: tuple[int, int] = (640, 640),
 ) -> InferencePipeline:
     engine = TileInferenceEngine(model_path, device=device)
-    slicer = make_slicer(slicing_mode, overlap_ratio)
+    slicer = make_slicer(slicing_mode, overlap_ratio, tile_size)
     return InferencePipeline(
         engine=engine,
         slicer=slicer,

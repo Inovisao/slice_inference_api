@@ -20,8 +20,14 @@ class Sahi:
             max(1, tile_h - int(tile_h * overlap)),
         )
 
+    @staticmethod
+    def _range_stop_including_last_valid_origin(img_dim: int, tile_dim: int) -> int:
+        """Python range() stop value that includes img_dim - tile_dim when aligned."""
+        return max(img_dim - tile_dim + 1, 1)
+
     def _axis_positions(self, img_dim: int, tile_dim: int, stride: int) -> List[int]:
-        positions = list(range(0, max(img_dim - tile_dim + 1, 1), stride))
+        range_stop = self._range_stop_including_last_valid_origin(img_dim, tile_dim)
+        positions = list(range(0, range_stop, stride))
         last = max(img_dim - tile_dim, 0)
         if positions and positions[-1] != last:
             positions.append(last)

@@ -24,6 +24,9 @@ paths:
 # Recortes (campo 'name' abaixo) a executar em geraResultados.py.
 setups_to_run:
   - asahi_rect
+  - sahi
+  - asahi
+  - all_640
 
 # Catalogo de recortes disponiveis. Adicione novos aqui + um arquivo em configs/.
 setups:

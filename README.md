@@ -1,8 +1,8 @@
 # Slice Inference API
 
 Pipeline para preparar datasets de imagens em alta resolução, gerar recortes
-SAHI/ASAHI em validação cruzada, treinar detectores e avaliar inferência
-fatiada para detecção de pequenos objetos.
+SAHI/ASAHI/ASAHI-Rect em validação cruzada, treinar detectores e avaliar
+inferência fatiada para detecção de pequenos objetos.
 
 O fluxo principal é:
 
@@ -25,6 +25,9 @@ models/<recorte>/fold_N/<modelo>/manifest.json
     ▼
 avaliação e visualizações                    python geraResultados.py
 ```
+
+Para uma sequência operacional passo a passo, use
+[docs/TUTORIAL_USO.md](docs/TUTORIAL_USO.md).
 
 ## Instalação
 
@@ -80,8 +83,18 @@ Cuidados antes de gerar os recortes:
 
 ### Configuração dos recortes
 
-A configuração é dividida em duas camadas. O [config.yaml](config.yaml) é um
-**índice de setups** — lista os recortes disponíveis e seleciona quais rodar:
+A configuração é dividida em duas camadas. Essa ordem é o contrato do
+orquestrador:
+
+```text
+main.py
+  └── config.yaml
+        ├── setups_to_run
+        └── setups[].config -> configs/<recorte>.yaml
+```
+
+O [config.yaml](config.yaml) é um **índice de setups**: ele lista os recortes
+disponíveis e seleciona quais entram no pipeline.
 
 ```yaml
 paths:
@@ -90,11 +103,11 @@ paths:
   models: ./models
   results: ./results
 
-# Quais recortes rodar em geraResultados.py.
+# Quais recortes rodar no pipeline e na avaliação.
 setups_to_run:
   - asahi_rect
 
-# Catálogo de recortes; cada um aponta para um arquivo em configs/.
+# Catálogo de recortes; cada item aponta para um arquivo em configs/.
 setups:
   - { name: sahi,       config: configs/sahi.yaml }
   - { name: asahi,      config: configs/asahi.yaml }
@@ -102,8 +115,9 @@ setups:
   - { name: all_640,    config: configs/all_640.yaml }
 ```
 
-Cada `configs/<recorte>.yaml` tem o bloco de configuração do recorte **e a lista
-de modelos a avaliar**:
+Cada `configs/<recorte>.yaml` contém dataset, slicing, folds, inferência e a
+lista de modelos a avaliar. O pipeline de geração dos tiles lê `mode`,
+`tile_size` e `overlap_ratio` desse arquivo.
 
 ```yaml
 # configs/asahi_rect.yaml
@@ -126,10 +140,9 @@ inference:
   conf_threshold: 0.5
   iou_threshold: 0.5
   batch_size: 32
-# Modelos a avaliar. Troque aqui para rodar outro modelo — NÃO crie um setup por
-# modelo. O prefixo do nome define o engine (YOLO* -> Ultralytics, FASTER ->
-# faster_rcnn, DETR -> detr) e o nome é a pasta de pesos correspondente.
-models: [YOLOV8L]
+# Modelos a avaliar. Troque aqui para rodar outro modelo — não crie um setup por
+# modelo. O prefixo define o engine e o nome deve existir na pasta de pesos.
+models: [DETR, Faster, YOLOV8N]
 ```
 
 **Contrato de saída (fixo).** A avaliação grava por modelo em
@@ -141,9 +154,13 @@ um modelo novo, inclua o nome em `models:` e coloque os pesos em
 
 Modos suportados:
 
-- `sahi`: grade de tiles fixos 640x640 com overlap configurado.
-- `asahi`: tile quadrado adaptativo por resolução.
-- `asahi_rect`: tile retangular adaptativo, com largura/altura resolvidas por eixo.
+- `sahi`: grade de patches fixos `M x N`, com patch overlap configurado.
+- `asahi`: Adaptive Slicing-Assisted Hyper Inference. Seleciona grade `3x2` ou
+  `4x3` pelo threshold dependente da resolução `T = r * (4 - 3 * mu) + 1`; neste
+  experimento `r=640` e `mu=overlap_ratio`.
+- `asahi_rect`: adaptação retangular do ASAHI. Mantém a escolha de grade baseada
+  no ASAHI, mas resolve largura e altura do patch por eixo.
+- `none`: baseline `all_640`, sem recorte.
 
 Parâmetros importantes:
 
@@ -157,14 +174,21 @@ Parâmetros importantes:
 
 ### Gerar os datasets recortados
 
-`main.py` gera os datasets dos recortes em `setups_to_run`. Gerar todos os
-recortes selecionados:
+`main.py` gera os datasets dos recortes selecionados em `setups_to_run`:
 
 ```bash
 python main.py --yes
 ```
 
-`--process N` restringe pelo índice (1..N) na ordem de `setups_to_run`:
+Use `--setup` para gerar um recorte específico:
+
+```bash
+python main.py --setup sahi --yes
+python main.py --setup asahi --yes
+python main.py --setup asahi_rect --yes
+```
+
+`--process N` restringe pelo índice na ordem de `setups_to_run`:
 
 ```bash
 python main.py --process 1 --yes
@@ -195,13 +219,26 @@ dataset/asahi_rect/
 └── per_image_metrics.csv
 ```
 
-Regra metodológica: somente `train` recebe imagem inteira letterbox + tiles. Os
-splits `val` e `test` preservam imagens originais com labels YOLO normalizados.
+Regra metodológica: somente `train` recebe imagem inteira redimensionada com
+letterbox + patches. Os splits `val` e `test` preservam as imagens originais com
+labels YOLO normalizados pela resolução original.
 
 Valide o contrato antes do treinamento:
 
 ```bash
 python train_model/compara_detectores_torch/scripts/validate_dataset_contract.py --root dataset/asahi_rect
+```
+
+Para gerar o baseline sem slicing:
+
+```bash
+python scripts/build_baseline_all_640.py \
+  --source dataset/all \
+  --fold-source dataset/asahi_rect \
+  --output dataset/all_640 \
+  --size 640 \
+  --seed 42 \
+  --overwrite
 ```
 
 ## 2. Configurações Do Treinamento
@@ -233,7 +270,9 @@ Significado:
 - `DATASET_ROOT`: dataset recortado a treinar, por exemplo `dataset/sahi`, `dataset/asahi` ou `dataset/asahi_rect`. Obrigatório.
 - `MODEL_CHECKPOINTS_ROOT`: pasta dos pesos/checkpoints da execução de treino. Use `pesos/<modo>/model_checkpoints`.
 - `EVAL_MODELS_ROOT`: raiz onde serão gravados apenas os manifestos compatíveis com `geraResultados.py`.
-- `MODELS_TO_RUN`: modelos a treinar, separados por vírgula.
+- `MODELS_TO_RUN`: modelos a treinar, separados por vírgula. No treino, use os
+  nomes aceitos pelo módulo (`YOLOV8`, `Faster`, `Detr`). Na avaliação, os YAMLs
+  usam os nomes das pastas de pesos/manifestos (`YOLOV8N`, `Faster`, `DETR`).
 - `TILING_MODE`: modo de avaliação; para estes datasets use `basic` ou omita.
 
 Modelos aceitos pelo módulo de treino:
@@ -295,24 +334,35 @@ Vários detectores também aceitam sobrescrita por variáveis de ambiente, como
 
 ### Smoke test recomendado
 
-Antes de rodar todos os folds/modelos, rode um único modelo:
+Antes de rodar todos os folds/modelos, rode um teste curto. Ele força 1 época por
+fold e desativa avaliação/visualizações do treinamento:
 
 ```bash
 DATASET_ROOT=dataset/asahi_rect \
-MODEL_CHECKPOINTS_ROOT=pesos/asahi_rect/model_checkpoints \
+MODEL_CHECKPOINTS_ROOT=pesos/asahi_rect_smoke/model_checkpoints \
 EVAL_MODELS_ROOT=models \
 MODELS_TO_RUN=YOLOV8 \
-python train_model/compara_detectores_torch/src/main.py
+python train_model/compara_detectores_torch/src/main.py --smoke-test --no-eval
 ```
 
 O treinamento deve gerar pelo menos:
 
 ```text
-pesos/asahi_rect/model_checkpoints/fold_1/YOLOV8/train/weights/best.pt
+pesos/asahi_rect_smoke/model_checkpoints/fold_1/YOLOV8/train/weights/best.pt
 ```
 
-Renomeie a pasta para a variante desejada (ex.: `YOLOV8N`) e gere o manifesto
-com `python scripts/link_pesos_checkpoints.py`:
+Para uma execução real, use uma raiz de pesos sem `_smoke`, por exemplo:
+
+```bash
+DATASET_ROOT=dataset/sahi \
+MODEL_CHECKPOINTS_ROOT=pesos/sahi/model_checkpoints \
+EVAL_MODELS_ROOT=models \
+MODELS_TO_RUN=YOLOV8,Faster,Detr \
+python train_model/compara_detectores_torch/src/main.py
+```
+
+Se treinar YOLOv8n, padronize a pasta de pesos para o nome usado na avaliação
+(`YOLOV8N`) e gere o manifesto:
 
 ```text
 models/asahi_rect/fold_1/YOLOV8N/manifest.json
@@ -343,6 +393,22 @@ O script:
 O CSV é append-only: cada execução soma linhas com o rótulo `<RECORTE>_<MODELO>`,
 sem apagar resultados anteriores. Se rodar o mesmo recorte/modelo duas vezes, as
 linhas duplicam — remova as antigas manualmente se necessário.
+
+Para avaliar apenas um recorte/modelo/fold:
+
+```bash
+python geraResultados.py --setup asahi --model DETR --folds 1,2,3,4,5
+```
+
+Para uma execução diagnóstica sem contaminar o CSV oficial:
+
+```bash
+python geraResultados.py \
+  --setup asahi \
+  --model DETR \
+  --results-csv results/diagnostics/asahi_detr_results.csv \
+  --counting-csv results/diagnostics/asahi_detr_counting.csv
+```
 
 Arquivos principais:
 
@@ -403,7 +469,7 @@ curl -X POST http://localhost:8000/inference/single_image \
     "model_path": "./pesos/sahi/model_checkpoints/fold_1/YOLOV8N/train/weights/best.pt",
     "image_name": "imagem_01.jpg",
     "slicing_mode": "sahi",
-    "overlap_ratio": 0.1,
+    "overlap_ratio": 0.15,
     "suppression": "nms",
     "conf": 0.5,
     "iou_thr": 0.5,
@@ -424,7 +490,7 @@ curl -X POST http://localhost:8000/inference/single_image \
 ├── configs/                        # um <recorte>.yaml por recorte (config + models)
 ├── src/
 │   ├── dataset/                    # preprocessamento COCO e folds determinísticos
-│   ├── slicing/                    # SAHI, ASAHI e ASAHI retangular
+│   ├── slicing/                    # SAHI, ASAHI e ASAHI-Rect
 │   ├── suppression/                # NMS, WBF, Cluster-DIoU-NMS etc.
 │   ├── inference/                  # motores e pipeline de inferência fatiada
 │   ├── evaluation/                 # loader, matcher e métricas
@@ -452,9 +518,11 @@ curl -X POST http://localhost:8000/inference/single_image \
 
 - `src/dataset/preprocessor.py`: valida e normaliza COCO bruto.
 - `src/dataset/kfold_generator.py`: cria splits, tiles, labels YOLO, JSONs COCO por split e relatórios.
-- `src/slicing/sahi.py`: recorte em grade fixa.
-- `src/slicing/asahi.py`: recorte quadrado adaptativo.
-- `src/slicing/asahi_rect.py`: recorte retangular adaptativo.
+- `src/slicing/sahi.py`: recorte em grade fixa, com patch overlap configurado.
+- `src/slicing/asahi.py`: ASAHI conforme nomenclatura do paper (`mu`, `r`, `T`,
+  `p`, `ncols`, `nrows`, `llong`, `lshort`, `slice_w`, `slice_h`).
+- `src/slicing/asahi_rect.py`: adaptação retangular baseada na escolha de grade
+  do ASAHI.
 - `train_model/compara_detectores_torch/src/main.py`: orquestra treinamento multi-modelo por fold.
 - `train_model/compara_detectores_torch/src/dataset_contract.py`: valida e resolve o contrato cross-fold.
 - `train_model/compara_detectores_torch/src/Detectors/*`: conversão de labels, treino e inferência de cada detector.
@@ -473,8 +541,9 @@ dataset/<modo>/fold_N/split/images
 dataset/<modo>/fold_N/split/labels
 ```
 
-Checkpoint para avaliação — `<MODELO>` é o nome livre usado em `models:`
-(o prefixo define o engine e o arquivo de peso esperado):
+Checkpoint para avaliação — `<MODELO>` é o nome usado em `models:` nos YAMLs
+(o prefixo define o engine e o arquivo de peso esperado). Os pesos ficam em
+`pesos/`; `models/` contém apenas manifestos leves usados pelo avaliador.
 
 ```text
 pesos/<recorte>/model_checkpoints/fold_N/<YOLO*>/train/weights/best.pt   # ex. YOLOV8N, YOLOV8L

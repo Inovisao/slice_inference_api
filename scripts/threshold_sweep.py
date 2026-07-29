@@ -1,15 +1,14 @@
 """Confidence-threshold analysis with a leakage-free protocol:
 
-  1. Collect raw (pre-suppression) YOLO detections at a low confidence floor
+  1. Collect raw (pre-suppression) detections at a low confidence floor
      on both `val` and `test` splits, once per mode/fold.
   2. Sweep thresholds on `val` only -> per-mode operating curve, saved to CSV
      for plotting/reporting.
   3. Pick the best-F1 threshold per mode from the `val` curve.
   4. Apply that FIXED threshold to `test` (never re-tuned on test) to report
      the final per-fold operating-point metrics (P/R/F1/MAE) with std.
-  5. Report mAP separately, computed on the full `test` detections (conf>=floor,
-     not further threshold-gated) — mAP is a full precision-recall-curve
-     metric and should not be truncated by a hard confidence cutoff.
+  5. Save threshold-specific mAP50/P/R/F1/MAE rows so the operating point can be
+     selected on validation and applied unchanged to held-out test.
 
 Filtering must happen BEFORE suppression, not after — suppression depends on
 which boxes are present, so re-filtering an already-suppressed set does not
@@ -25,6 +24,7 @@ import csv
 import os
 import pickle
 import sys
+import argparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -55,6 +55,11 @@ SUPPRESSION_BY_MODE = {
 # legacy alias kept for the YOLO-only sweep path below
 THRESHOLDS = [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8]
 IOU_THR = 0.5
+
+
+def _suppression_for_dataset(dataset_name: str) -> str:
+    slicing_mode = "none" if dataset_name == "all_640" else dataset_name
+    return SUPPRESSION_BY_MODE[slicing_mode]
 
 
 def _cache_path(split: str, arch: str = "YOLO") -> str:
@@ -91,7 +96,7 @@ def collect(split: str, arch: str = "YOLO"):
 
             print(f"[collect:{split}:{arch}] {dataset_name} fold_{fold}: {weights}")
             engine = make_engine(arch, weights, device="cuda")
-            slicer = make_slicer(mode, proc.slicing.overlap_ratio)
+            slicer = make_slicer(mode, proc.slicing.overlap_ratio, proc.slicing.tile_size)
             fold_loader = FoldTestLoader(split_dir)
             images = fold_loader.list_images()
 
@@ -151,17 +156,19 @@ def _fold_metrics(records, thr, suppression, iou_thr=IOU_THR):
     return map50, p, r, f1, mae
 
 
-def sweep_curve(data, mode):
+def sweep_curve(data, mode, arch):
     """Per-threshold, mean-across-folds curve for one mode. Returns list of dict rows."""
-    suppression = SUPPRESSION_BY_MODE[mode]
+    suppression = _suppression_for_dataset(mode)
     rows = []
     for thr in THRESHOLDS:
         per_fold = [
             _fold_metrics(data[(mode, fold)], thr, suppression)
             for fold in range(1, 6) if (mode, fold) in data
         ]
+        if not per_fold:
+            continue
         map50, p, r, f1, mae = (np.mean(x) for x in zip(*per_fold))
-        rows.append({"mode": mode, "threshold": thr, "mAP50": map50,
+        rows.append({"arch": arch, "mode": mode, "threshold": thr, "mAP50": map50,
                       "precision": p, "recall": r, "fscore": f1, "MAE": mae})
     return rows
 
@@ -171,63 +178,108 @@ def select_best_threshold(val_curve_rows):
     return best["threshold"]
 
 
-def evaluate_test_at_threshold(test_data, mode, thr):
+def evaluate_test_at_threshold(test_data, mode, arch, thr):
     """Per-fold rows at the val-selected fixed threshold — for mean±std reporting."""
-    suppression = SUPPRESSION_BY_MODE[mode]
+    suppression = _suppression_for_dataset(mode)
     rows = []
     for fold in range(1, 6):
         if (mode, fold) not in test_data:
             continue
         map50, p, r, f1, mae = _fold_metrics(test_data[(mode, fold)], thr, suppression)
-        rows.append({"mode": mode, "fold": fold, "threshold": thr,
+        rows.append({"arch": arch, "mode": mode, "fold": fold, "threshold": thr,
                       "mAP50": map50, "precision": p, "recall": r, "fscore": f1, "MAE": mae})
     return rows
 
 
-def main():
-    val_data = load_or_collect("val")
-    test_data = load_or_collect("test")
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="Sweep confidence thresholds on val and evaluate selected thresholds on test."
+    )
+    parser.add_argument(
+        "--arch",
+        choices=ARCHS + ["all"],
+        default=os.getenv("THRESHOLD_SWEEP_ARCH", "all"),
+        help="Architecture to evaluate. Use 'all' to process every supported architecture.",
+    )
+    parser.add_argument(
+        "--refresh-cache",
+        action="store_true",
+        help="Ignore existing raw-detection caches and recollect predictions.",
+    )
+    return parser.parse_args()
+
+
+def _remove_cache_if_requested(arch: str, refresh: bool) -> None:
+    if not refresh:
+        return
+    for split in ("val", "test"):
+        path = _cache_path(split, arch)
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def _run_for_arch(arch: str):
+    _remove_cache_if_requested(arch, _ARGS.refresh_cache)
+    val_data = load_or_collect("val", arch)
+    test_data = load_or_collect("test", arch)
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
     # 1) val sweep curve -> CSV for plotting
-    curve_path = os.path.join(RESULTS_DIR, "val_threshold_curve.csv")
+    curve_path = os.path.join(RESULTS_DIR, f"val_threshold_curve_{arch}.csv")
     all_curve_rows = []
-    for mode in sorted(TARGET_MODES):
-        all_curve_rows += sweep_curve(val_data, mode)
+    for mode in sorted(TARGET_DATASETS):
+        all_curve_rows += sweep_curve(val_data, mode, arch)
     with open(curve_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["mode", "threshold", "mAP50", "precision", "recall", "fscore", "MAE"])
+        writer = csv.DictWriter(f, fieldnames=["arch", "mode", "threshold", "mAP50", "precision", "recall", "fscore", "MAE"])
         writer.writeheader()
         writer.writerows(all_curve_rows)
     print(f"\nSaved val threshold curve to {curve_path}")
 
     # 2) pick best threshold per mode from val
     best_thr = {}
-    for mode in sorted(TARGET_MODES):
+    for mode in sorted(TARGET_DATASETS):
         mode_rows = [r for r in all_curve_rows if r["mode"] == mode]
+        if not mode_rows:
+            print(f"  {arch}/{mode}: no validation rows; skipping")
+            continue
         best_thr[mode] = select_best_threshold(mode_rows)
-        print(f"  {mode}: selected threshold = {best_thr[mode]:.2f} (val F1={max(r['fscore'] for r in mode_rows):.3f})")
+        print(f"  {arch}/{mode}: selected threshold = {best_thr[mode]:.2f} (val F1={max(r['fscore'] for r in mode_rows):.3f})")
 
     # 3) apply fixed threshold to test -> per-fold rows for mean±std
-    test_path = os.path.join(RESULTS_DIR, "test_at_val_threshold.csv")
+    test_path = os.path.join(RESULTS_DIR, f"test_at_val_threshold_{arch}.csv")
     all_test_rows = []
-    for mode in sorted(TARGET_MODES):
-        all_test_rows += evaluate_test_at_threshold(test_data, mode, best_thr[mode])
+    for mode in sorted(TARGET_DATASETS):
+        if mode not in best_thr:
+            continue
+        all_test_rows += evaluate_test_at_threshold(test_data, mode, arch, best_thr[mode])
     with open(test_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["mode", "fold", "threshold", "mAP50", "precision", "recall", "fscore", "MAE"])
+        writer = csv.DictWriter(f, fieldnames=["arch", "mode", "fold", "threshold", "mAP50", "precision", "recall", "fscore", "MAE"])
         writer.writeheader()
         writer.writerows(all_test_rows)
     print(f"Saved test-at-val-threshold per-fold results to {test_path}")
 
-    print("\n=== Final: val-tuned threshold, evaluated on held-out test ===")
-    for mode in sorted(TARGET_MODES):
+    print(f"\n=== Final: {arch} val-tuned threshold, evaluated on held-out test ===")
+    for mode in sorted(TARGET_DATASETS):
+        if mode not in best_thr:
+            continue
         rows = [r for r in all_test_rows if r["mode"] == mode]
+        if not rows:
+            continue
         for field in ("mAP50", "precision", "recall", "fscore", "MAE"):
             vals = [r[field] for r in rows]
             mean = np.mean(vals)
             sd = np.std(vals, ddof=1)
             print(f"  {mode:12} thr={best_thr[mode]:.2f}  {field:10} {mean:.3f} ± {sd:.3f}")
         print()
+
+
+def main():
+    global _ARGS
+    _ARGS = _parse_args()
+    archs = ARCHS if _ARGS.arch == "all" else [_ARGS.arch]
+    for arch in archs:
+        _run_for_arch(arch)
 
 
 if __name__ == "__main__":

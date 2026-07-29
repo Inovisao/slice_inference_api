@@ -48,6 +48,10 @@ def test_generator_writes_trainable_deterministic_folds(tmp_path):
     folds = generator.run()
 
     assert len(folds) == 2
+    manifest = json.loads((output / "dataset_manifest.json").read_text())
+    assert manifest["layout"]["image_dir_pattern"] == "{fold}/{split}/images"
+    assert manifest["tiling"]["mode"] == "sahi"
+    assert manifest["tiling"]["overlap_ratio"] == 0.25
     for fold in (1, 2):
         data = yaml.safe_load(
             (output / "filesJSON_infos" / f"fold_{fold}.yaml").read_text()

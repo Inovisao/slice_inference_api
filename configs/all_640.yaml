@@ -23,4 +23,4 @@ inference:
   iou_threshold: 0.5
   batch_size: 32
 
-models: [YOLOV8N, FASTER, DETR]
+models: [DETR, Faster, YOLOV8N]

@@ -12,10 +12,14 @@ from slicing.asahi_rect import AsahiRect
 from slicing.none import NoSlice
 
 
-def make_slicer(slicing_mode: str, overlap_ratio: float):
+def make_slicer(
+    slicing_mode: str,
+    overlap_ratio: float,
+    tile_size: tuple[int, int] = (640, 640),
+):
     slicing_config = SlicingConfig(
         slicing_mode=slicing_mode,
-        tile_size=(640, 640),
+        tile_size=tile_size,
         overlap_ratio=overlap_ratio,
     )
     if slicing_mode == "asahi":

@@ -20,8 +20,7 @@ class AsahiRect:
         self._square_reference = Asahi(slicing_config)
 
     def compute_grid(self, img_w: int, img_h: int) -> Tuple[int, int]:
-        p = self._square_reference.compute_tile_size(img_w, img_h)
-        square_cols, square_rows = self._square_reference.compute_grid(img_w, img_h, p)
+        square_cols, square_rows = self._square_reference.select_slice_grid(img_w, img_h)
 
         if img_w >= img_h:
             cols = square_cols

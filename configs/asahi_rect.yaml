@@ -26,4 +26,4 @@ inference:
 # Modelos a avaliar. Nome livre: o prefixo define o engine (YOLO* -> YOLO
 # Ultralytics, FASTER -> faster_rcnn, DETR -> detr) e tambem o nome da pasta de
 # pesos em pesos/asahi_rect/model_checkpoints/fold_N/<modelo>/.
-models: [YOLOV8L]
+models: [DETR, Faster, YOLOV8N]

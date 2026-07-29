@@ -11,3 +11,4 @@ results_01
 models/*
 model_checkpoints
 train_model/compara_detectores_torch
+docs/ai_docs/
